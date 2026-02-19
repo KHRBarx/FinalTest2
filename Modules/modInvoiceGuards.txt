@@ -1,0 +1,32 @@
+Option Compare Database
+Option Explicit
+
+Public Function EnsureClientHasAccountsEmail(ByVal ClientID As Long, _
+                                             Optional ByVal showPrompt As Boolean = True) As Boolean
+    On Error GoTo ErrHandler
+
+    Dim rawEmail As Variant
+    Dim em As String
+
+    EnsureClientHasAccountsEmail = False
+    If ClientID <= 0 Then Exit Function
+
+    rawEmail = DLookup("HeadOfficeEmail", "t_Clients", "ClientID=" & ClientID)
+    em = Trim$(Nz(rawEmail, ""))
+
+    If Len(em) = 0 Then
+        If showPrompt Then
+            MsgBox "This client has no Accounts email (HeadOfficeEmail) in t_Clients." & vbCrLf & vbCrLf & _
+                   "Please add HeadOfficeEmail before creating a supplementary invoice.", _
+                   vbExclamation, "Accounts email required"
+        End If
+        Exit Function
+    End If
+
+    EnsureClientHasAccountsEmail = True
+    Exit Function
+
+ErrHandler:
+    MsgBox "Error validating client accounts email: " & Err.Number & " - " & Err.Description, _
+           vbCritical, "Validation error"
+End Function

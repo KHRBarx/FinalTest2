@@ -1,0 +1,7 @@
+Option Compare Database
+Option Explicit
+
+Public Sub Status(s As String)
+Forms!MAIN_FORM!StatusBox = s & vbNewLine & Forms!MAIN_FORM!StatusBox
+DoEvents
+End Sub

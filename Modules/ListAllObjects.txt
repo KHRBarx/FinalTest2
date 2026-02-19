@@ -1,0 +1,40 @@
+Option Compare Database
+Option Explicit
+Sub ListAllAccessObjects()
+    Dim db As DAO.Database
+    Dim tdf As DAO.TableDef
+    Dim qdf As DAO.QueryDef
+    Dim doc As Document
+    Dim cnt As Container
+    Dim output As String
+    Dim i As Integer
+    
+    Set db = CurrentDb()
+
+    Debug.Print "=== Tables ==="
+    For Each tdf In db.TableDefs
+        If Left(tdf.Name, 4) <> "MSys" Then ' Exclude system tables
+            Debug.Print tdf.Name
+        End If
+    Next
+
+    Debug.Print "=== Queries ==="
+    For Each qdf In db.QueryDefs
+        If Left(qdf.Name, 4) <> "~sq_" Then
+            output = output & "Query: " & qdf.Name & vbCrLf
+            Debug.Print qdf.Name
+        End If
+    Next
+
+    Debug.Print "=== Forms ==="
+    Set cnt = db.Containers("Forms")
+    For Each doc In cnt.Documents
+        Debug.Print doc.Name
+    Next
+
+    Debug.Print "=== Reports ==="
+    Set cnt = db.Containers("Reports")
+    For Each doc In cnt.Documents
+        Debug.Print doc.Name
+    Next
+End Sub

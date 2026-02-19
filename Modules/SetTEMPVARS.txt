@@ -1,0 +1,97 @@
+Option Compare Database
+Option Explicit
+
+'#### This sets the default values when the database starts up.
+'#### Includes things like: the most recent enquiry and quote IDs, etc
+
+Public Function SetStartupTempVars()
+
+    TempVars!Helpdesk = "kris.j.barker@gmail.com" ' need to make this an editable field in the future.
+        
+    'Fixed fee for reports
+    TempVars!ReportPrice = DLookup("ReportFee", "t_ReportPrices", "ReportID = " & 1)
+    TempVars!ClassReportPrice = DLookup("ReportFee", "t_ReportPrices", "ReportID = " & 2)
+    TempVars!ShortClassReportPrice = DLookup("ReportFee", "t_ReportPrices", "ReportID = " & 3)
+    'EXAP report percent and min fee
+    TempVars!EXAPPercent = DLookup("ReportPercentFee", "t_ReportPrices", "ReportID = " & 4)
+    TempVars!exapMin = DLookup("ReportFee", "t_ReportPrices", "ReportID = " & 4)
+    'Quote Locations
+    TempVars!QuoteSaveLocation = DLookup("Location", "x_SaveLocations", "Type = " & "'QUOTE'")
+        
+End Function
+
+
+'--------------------------------------------------------------------------------------------------------------------
+
+'#### This is the code used for the shortcut to display all the TEMPVARS (temporary variables) stored in memory.
+
+Sub ListAllTempVars()
+    Dim i As Integer
+    Dim tempVar As tempVar
+    
+    i = 0
+    On Error Resume Next  ' Suppress errors to detect the end of TempVars
+    
+    Debug.Print "---- Current TempVars ----"
+    
+    ' Loop through TempVars by attempting to access each by index
+    Do
+        Set tempVar = TempVars(i)
+        If Err.Number <> 0 Then Exit Do  ' Exit loop when no more TempVars
+        
+        Debug.Print "Name: " & tempVar.Name & " | Value: " & tempVar.value
+        i = i + 1
+    Loop
+    
+    On Error GoTo 0  ' Restore normal error handling
+    
+    If i = 0 Then
+        Debug.Print "No TempVars are currently defined."
+    End If
+End Sub
+
+
+'#### Runs the initial call for the code. Using a function to allow quick access shortcuts.
+
+Public Function RunListAllTempVars() As Boolean
+    ' Call the subroutine
+    Call ListAllTempVars
+    
+    ' Set function return value to True if it completes successfully
+    RunListAllTempVars = True
+End Function
+
+Public Sub SaveAllTempVars()
+
+    Dim db As DAO.Database
+    Dim rsT As DAO.Recordset
+
+    Set db = CurrentDb()
+
+    ' Optional: clear existing data (if you want to keep just the latest values)
+    'db.Execute "DELETE FROM t_TempVars", dbFailOnError
+
+    Set rsT = db.OpenRecordset("t_TempVars", dbOpenDynaset)
+
+On Error Resume Next
+
+    rsT.AddNew
+    rsT!EnquiryID = TempVars!EnquiryID
+    rsT!QuoteID = TempVars!QuoteID
+    rsT!OrderID = TempVars!OrderID
+    rsT!ClientID = TempVars!ClientID
+    rsT!UserID = TempVars!UserID
+    rsT!SampleID = TempVars!SampleID
+    rsT!SCID = TempVars!SCID
+    rsT!Aperture = TempVars!Aperture
+    rsT!QNum = Nz(TempVars!QNum, "")
+    rsT!DeptName = Nz(TempVars!DeptName, "")
+
+    rsT.Update
+    
+
+    rsT.Close
+    Set rsT = Nothing
+    Set db = Nothing
+        
+End Sub

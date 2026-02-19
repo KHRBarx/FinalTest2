@@ -1,0 +1,81 @@
+Option Compare Database
+Option Explicit
+
+'###### Supporting Construction #######
+
+Public Sub UpdateSCCost()
+    On Error GoTo ErrHandler
+
+    Dim sql As String
+    Dim rs As DAO.Recordset
+    Dim NoTests As Long
+    Dim SCRequired As Boolean
+
+    Dim DeptID As Long
+    Dim SCMaterialID As Long
+    Dim TestLengthID As Long
+    Dim ApertureID As Long
+
+    Dim frm As Form
+
+    Set frm = Forms!MAIN_FORM!subContentFrame.Form
+
+    ' Default
+    frm!SCPrice.value = 0
+
+    SCRequired = CBool(Nz(frm!SCRequired.value, False))
+    If Not SCRequired Then GoTo CleanExit
+
+    ' Pull required values
+    DeptID = CLng(Nz(TempVars("Dept"), 0))             ' DepartmentID
+    SCMaterialID = CLng(Nz(TempVars("SCID"), 0))      ' SCMaterialID
+    TestLengthID = CLng(Nz(TempVars("TestLength"), 0)) ' TestLengthID
+    ApertureID = CLng(Nz(TempVars("Aperture"), 0))    ' ApertureID
+
+    ' Preserve existing rule
+    If Nz(TempVars("DeptName"), vbNullString) = "Acoustics" Then
+        If TestLengthID = 0 Then
+            TestLengthID = 9
+            TempVars("TestLength") = 9
+        End If
+    End If
+
+    ' Exit early if anything required is missing
+    If DeptID = 0 Or SCMaterialID = 0 Or TestLengthID = 0 Or ApertureID = 0 Then
+        frm!SCPrice.value = 0
+        GoTo CleanExit
+    End If
+
+    ' Not currently used, but preserved from your structure
+    NoTests = 1
+
+    ' Single-row result even if duplicates exist
+    sql = "SELECT Count(*) AS MatchCount, Avg(AverageCost) AS Price " & _
+          "FROM t_SupportingConstructions " & _
+          "WHERE DepartmentID = " & DeptID & " " & _
+          "AND SCMaterialID = " & SCMaterialID & " " & _
+          "AND TestLengthID = " & TestLengthID & " " & _
+          "AND ApertureID = " & ApertureID & ";"
+
+    Set rs = CurrentDb.OpenRecordset(sql, dbOpenSnapshot)
+
+    If Not (rs.BOF And rs.EOF) Then
+        If Nz(rs!MatchCount, 0) > 0 Then
+            frm!SCPrice.value = Nz(rs!Price, 0) * NoTests
+        Else
+            frm!SCPrice.value = 0
+        End If
+    End If
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set frm = Nothing
+    Exit Sub
+
+ErrHandler:
+    ' Fail closed
+    If Not frm Is Nothing Then frm!SCPrice.value = 0
+    Resume CleanExit
+End Sub

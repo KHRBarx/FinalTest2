@@ -1,0 +1,30 @@
+Option Compare Database
+Option Explicit
+
+' Returns the next 5-digit code starting with 9 as TEXT
+Public Function GetNextClientCode_Text() As String
+    Const FIRST_CODE As Long = 90000
+    Dim varMax As Variant
+    Dim lngNext As Long
+
+    ' Get highest text code that looks like 9####
+    ' (5 characters: 9 + 4 digits)
+    varMax = DMax("ClientCode", "t_ARTCCodes", "ClientCode Like '9####'")
+
+    If IsNull(varMax) Then
+        ' No existing 9xxxx codes – start at FIRST_CODE
+        lngNext = FIRST_CODE
+    Else
+        ' Convert text to number and add 1
+        lngNext = CLng(varMax) + 1
+    End If
+
+    ' Safety check – don’t go beyond 99999
+    If lngNext > 99999 Then
+        Err.Raise vbObjectError + 1000, "GetNextClientCode_Text", _
+                  "No more 5-digit codes available in the 9xxxx range."
+    End If
+
+    ' Return as text, because ClientCode is Short Text
+    GetNextClientCode_Text = CStr(lngNext)
+End Function

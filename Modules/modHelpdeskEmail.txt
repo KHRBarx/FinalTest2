@@ -1,0 +1,107 @@
+Option Compare Database
+Option Explicit
+
+' Call this after a record is inserted to email the helpdesk
+Public Sub SendHelpdeskEmail(frm As Form)
+    On Error GoTo CleanFail
+
+    ' --- Get destination address from TempVars ---
+    Dim toAddr As String
+    toAddr = Nz(TempVars!Helpdesk, vbNullString)
+    If Len(toAddr) = 0 Then
+        ' No address configured; bail quietly or show a message if you prefer
+        Exit Sub
+    End If
+
+    ' --- Read fields from the form ---
+    Dim Urgency As Variant
+    Dim Headline As String
+    Dim LoggedBy As String
+    Dim DateLogged As Date
+    Dim descr As String
+
+    Urgency = Nz(frm!Urgency, "") ' should display string not ID
+    Headline = Nz(frm!Headline, "")
+    LoggedBy = Nz(frm!LoggedBy, "") ' should dispay staff name not ID (currently = ID)
+    DateLogged = Nz(frm!DateLogged, Now())
+    descr = Nz(frm!Description, "")
+
+    ' --- Subject: "Urgency - Headline" ---
+    Dim subj As String
+    subj = "ARTC.db Help Request - " & CStr(Urgency) & " - " & Headline
+
+    ' --- Build details for body & attachment ---
+    Dim detailsTxt As String
+    detailsTxt = "New Helpdesk Ticket" & vbCrLf & _
+                 "---------------------" & vbCrLf & _
+                 "Headline:   " & Headline & vbCrLf & _
+                 "Logged By:  " & LoggedBy & vbCrLf & _
+                 "Date Logged:" & Format$(DateLogged, "yyyy-mm-dd HH:nn") & vbCrLf & _
+                 "Urgency:    " & CStr(Urgency) & vbCrLf & vbCrLf & _
+                 "Description:" & vbCrLf & descr & vbCrLf
+
+    Dim bodyHtml As String
+    bodyHtml = "<html><body>" & _
+               "<h3>New Helpdesk Ticket</h3>" & _
+               "<p><b>Headline:</b> " & HtmlEncode(Headline) & "<br>" & _
+               "<b>Logged By:</b> " & HtmlEncode(LoggedBy) & "<br>" & _
+               "<b>Date Logged:</b> " & HtmlEncode(Format$(DateLogged, "yyyy-mm-dd HH:nn")) & "<br>" & _
+               "<b>Urgency:</b> " & HtmlEncode(CStr(Urgency)) & "<br><br>" & _
+               "<b>Description</b><br>" & Replace(HtmlEncode(descr), vbCrLf, "<br>") & _
+               "</p></body></html>"
+
+    ' --- Send via Outlook (late binding; no reference needed) ---
+    Dim olApp As Object, olMail As Object
+    Set olApp = CreateObject("Outlook.Application")
+    Set olMail = olApp.CreateItem(0) ' 0 = olMailItem
+
+    With olMail
+        .To = toAddr
+        .Subject = subj
+        .htmlBody = bodyHtml
+
+        ' If Urgency = 4, mark High Importance and add an urgent follow-up flag
+        If val(Urgency) = 4 Then
+            .Importance = 2          ' 2 = olImportanceHigh
+            On Error Resume Next
+            .FlagRequest = "Urgent"
+            .FlagStatus = 2          ' 2 = olFlagMarked
+            On Error GoTo 0
+        End If
+
+        ' Send immediately. If you prefer to preview, replace with .Display
+        .Send
+    End With
+
+CleanExit:
+    On Error Resume Next
+    'If Len(attachPath) > 0 Then Kill attachPath
+    Set olMail = Nothing
+    Set olApp = Nothing
+    Exit Sub
+
+CleanFail:
+    Debug.Print Err.Number, Err.Description
+    Resume CleanExit
+End Sub
+
+' --- Helpers ---
+
+Private Sub WriteTextFile(ByVal filePath As String, ByVal contents As String)
+    Dim fso As Object, ts As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set ts = fso.CreateTextFile(filePath, True, False) ' overwrite:=True, unicode:=False
+    ts.Write contents
+    ts.Close
+End Sub
+
+Private Function HtmlEncode(ByVal s As String) As String
+    Dim t As String
+    t = s
+    t = Replace(t, "&", "&amp;")
+    t = Replace(t, "<", "&lt;")
+    t = Replace(t, ">", "&gt;")
+    t = Replace(t, """", "&quot;")
+    t = Replace(t, "'", "&#39;")
+    HtmlEncode = t
+End Function

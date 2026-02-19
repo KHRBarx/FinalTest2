@@ -1,0 +1,397 @@
+Option Compare Database
+Option Explicit
+
+' =============================================================================
+' modOutlookSync (rewritten)
+'
+' - Syncs TEST / INSTALL / DECON all-day entries into the shared calendar.
+' - Colour-codes items by assigning Outlook Categories based on Me!Department (text).
+' - Uses stored EntryIDs: OutlookID_Test / OutlookID_Install / OutlookID_Decon.
+' - Install logic: Install exists if InstallDate is not Null and InstallDate <= TestDate - 1.
+' - Decon logic: Decon exists if DeconstructionDays > 0 (spans TestDate+1 .. TestDate+DeconstructionDays).
+'
+' Form controls / fields expected:
+'   TestDate (Date)
+'   InstallDate (Date, nullable)
+'   DeconstructionDays (Number, nullable)
+'   Department (Text, nullable)
+'   OutlookID_Test / OutlookID_Install / OutlookID_Decon (Text, nullable)
+'
+' Late-bound Outlook (no reference required).
+' =============================================================================
+
+' ===== CONFIG =====
+Public Const CALENDAR_OWNER_EMAIL As String = "kris.barker@attainrtc.co.uk"
+Public Const CALENDAR_SUBFOLDER As String = "LAB TESTING (Shared)"  ' "" = default calendar
+
+' Back-compat wrappers so your existing form code can continue to call these
+Public Sub SyncCurrentRecordToOutlook(frm As Form)
+    On Error GoTo Fail
+
+    If frm.Dirty Then frm.Dirty = False
+
+    Dim rs As DAO.Recordset
+    Set rs = frm.RecordsetClone
+    rs.Bookmark = frm.Bookmark
+
+    RebuildAllBookings_FromRecord rs, frm
+
+CleanUp:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Exit Sub
+
+Fail:
+    MsgBox "Outlook sync failed: " & Err.Description, vbExclamation
+    Resume CleanUp
+End Sub
+
+Public Sub SyncAllVisibleToOutlook(frm As Form)
+    On Error GoTo Fail
+
+    If frm.Dirty Then frm.Dirty = False
+
+    Dim rs As DAO.Recordset
+    Set rs = frm.RecordsetClone
+    If rs.BOF And rs.EOF Then GoTo CleanUp
+
+    rs.MoveFirst
+    Do Until rs.EOF
+        RebuildAllBookings_FromRecord rs, frm
+        rs.MoveNext
+    Loop
+
+CleanUp:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Exit Sub
+
+Fail:
+    MsgBox "Outlook sync-all failed: " & Err.Description, vbExclamation
+    Resume CleanUp
+End Sub
+
+
+' =============================================================================
+' CORE SYNC
+' =============================================================================
+
+Private Sub RebuildAllBookings_FromRecord(rs As DAO.Recordset, frm As Form)
+    On Error GoTo Fail
+
+    ' If no test date, delete any existing Outlook items and clear IDs
+    If IsNull(rs!TestDate) Then
+        DeleteByID GetOutlookNS(), ResolveSharedCalendar(GetOutlookNS()), rs!OutlookID_Test
+        DeleteByID GetOutlookNS(), ResolveSharedCalendar(GetOutlookNS()), rs!OutlookID_Install
+        DeleteByID GetOutlookNS(), ResolveSharedCalendar(GetOutlookNS()), rs!OutlookID_Decon
+
+        rs.Edit
+        rs!OutlookID_Test = Null
+        rs!OutlookID_Install = Null
+        rs!OutlookID_Decon = Null
+        rs.Update
+        Exit Sub
+    End If
+
+    ' Outlook objects
+    Dim olNS As Object
+    Set olNS = GetOutlookNS()
+
+    Dim cal As Object
+    Set cal = ResolveSharedCalendar(olNS)
+    If cal Is Nothing Then Err.Raise vbObjectError + 1001, , "Unable to resolve shared calendar."
+
+    ' Department -> Category
+    Dim deptCat As String
+    deptCat = DepartmentCategoryFromForm(frm)
+    If Len(deptCat) > 0 Then
+        EnsureCategoryExists cal, deptCat
+    End If
+
+    ' Subject/body
+    Dim apptTitle As String, apptBody As String
+    apptTitle = BuildTitleFromForm(frm)
+    apptBody = BuildBodyFromForm(frm)
+
+    ' Read dates safely
+    Dim dTest As Date
+    dTest = DateValue(CDate(rs!TestDate))
+
+    Dim hasInstall As Boolean
+    Dim dInstall As Date
+    hasInstall = Not IsNull(rs!InstallDate)
+    If hasInstall Then dInstall = DateValue(CDate(rs!InstallDate))
+
+    Dim deconDays As Long
+    deconDays = CLng(Nz(rs!DeconstructionDays, 0))
+
+    ' ==== TEST (always exists) ====
+    Dim newID As String
+    newID = UpsertAllDaySpan(olNS, cal, rs!OutlookID_Test, dTest, dTest, _
+                             "TEST - " & apptTitle, apptBody, deptCat)
+
+    If newID <> Nz(rs!OutlookID_Test, "") Then
+        rs.Edit: rs!OutlookID_Test = newID: rs.Update
+    End If
+
+    ' ==== INSTALL (optional) ====
+    If hasInstall And dInstall <= DateAdd("d", -1, dTest) Then
+        newID = UpsertAllDaySpan(olNS, cal, rs!OutlookID_Install, _
+                                 dInstall, CDate(DateAdd("d", -1, dTest)), _
+                                 "INSTALL - " & apptTitle, apptBody, deptCat)
+
+        If newID <> Nz(rs!OutlookID_Install, "") Then
+            rs.Edit: rs!OutlookID_Install = newID: rs.Update
+        End If
+    Else
+        ' Not applicable -> remove any existing install entry
+        If Nz(rs!OutlookID_Install, "") <> "" Then
+            DeleteByID olNS, cal, rs!OutlookID_Install
+            rs.Edit: rs!OutlookID_Install = Null: rs.Update
+        End If
+    End If
+
+    ' ==== DECON (optional) ====
+    If deconDays > 0 Then
+        Dim dDecStart As Date, dDecEnd As Date
+        dDecStart = CDate(DateAdd("d", 1, dTest))
+        dDecEnd = CDate(DateAdd("d", deconDays, dTest))
+
+        newID = UpsertAllDaySpan(olNS, cal, rs!OutlookID_Decon, _
+                                 dDecStart, dDecEnd, _
+                                 "DECON - " & apptTitle, apptBody, deptCat)
+
+        If newID <> Nz(rs!OutlookID_Decon, "") Then
+            rs.Edit: rs!OutlookID_Decon = newID: rs.Update
+        End If
+    Else
+        ' Not applicable -> remove any existing decon entry
+        If Nz(rs!OutlookID_Decon, "") <> "" Then
+            DeleteByID olNS, cal, rs!OutlookID_Decon
+            rs.Edit: rs!OutlookID_Decon = Null: rs.Update
+        End If
+    End If
+
+    Exit Sub
+
+Fail:
+    MsgBox "Sync failed: " & Err.Description, vbExclamation
+End Sub
+
+
+' =============================================================================
+' OUTLOOK WIRING
+' =============================================================================
+
+Private Function GetOutlookApp() As Object
+    On Error Resume Next
+    Set GetOutlookApp = GetObject(, "Outlook.Application")
+    If GetOutlookApp Is Nothing Then Set GetOutlookApp = CreateObject("Outlook.Application")
+    On Error GoTo 0
+End Function
+
+Private Function GetOutlookNS() As Object
+    Dim olApp As Object
+    Set olApp = GetOutlookApp()
+    If olApp Is Nothing Then Err.Raise vbObjectError + 2000, , "Outlook is not available."
+    Set GetOutlookNS = olApp.GetNamespace("MAPI")
+End Function
+
+Private Function ResolveSharedCalendar(ByVal olNS As Object) As Object
+    On Error GoTo Fail
+
+    Dim recip As Object
+    Set recip = olNS.CreateRecipient(CALENDAR_OWNER_EMAIL)
+    recip.Resolve
+    If Not recip.Resolved Then Err.Raise vbObjectError + 2001, , "Couldn’t resolve: " & CALENDAR_OWNER_EMAIL
+
+    ' 9 = olFolderCalendar
+    Dim cal As Object
+    Set cal = olNS.GetSharedDefaultFolder(recip, 9)
+    If cal Is Nothing Then Err.Raise vbObjectError + 2002, , "No access to shared calendar."
+
+    If Len(Trim$(CALENDAR_SUBFOLDER)) > 0 Then
+        Dim f As Object, found As Boolean
+        For Each f In cal.Folders
+            If StrComp(f.Name, CALENDAR_SUBFOLDER, vbTextCompare) = 0 Then
+                Set cal = f
+                found = True
+                Exit For
+            End If
+        Next f
+        If Not found Then Err.Raise vbObjectError + 2003, , _
+            "Subfolder '" & CALENDAR_SUBFOLDER & "' not found under the shared calendar."
+    End If
+
+    Set ResolveSharedCalendar = cal
+    Exit Function
+
+Fail:
+    Set ResolveSharedCalendar = Nothing
+End Function
+
+
+' =============================================================================
+' CATEGORIES
+' =============================================================================
+
+Private Function DepartmentCategoryFromForm(frm As Form) As String
+    On Error GoTo Fail
+
+    Dim s As String
+    s = Nz(SafeCtl(frm, "Department"), "")
+    s = Trim$(s)
+
+    ' Reduce accidental duplicates from spacing
+    Do While InStr(1, s, "  ", vbBinaryCompare) > 0
+        s = Replace(s, "  ", " ")
+    Loop
+
+    DepartmentCategoryFromForm = s
+    Exit Function
+
+Fail:
+    DepartmentCategoryFromForm = ""
+End Function
+
+Private Sub EnsureCategoryExists(cal As Object, ByVal categoryName As String)
+    ' Best-effort: attempt to add category to the store used by the calendar.
+    On Error GoTo SafeExit
+    If Len(categoryName) = 0 Then Exit Sub
+
+    Dim cats As Object
+    On Error Resume Next
+    Set cats = cal.Store.Categories
+    On Error GoTo 0
+    If cats Is Nothing Then Exit Sub
+
+    Dim cat As Object
+    On Error Resume Next
+    Set cat = cats.item(categoryName)
+    On Error GoTo 0
+
+    If cat Is Nothing Then
+        On Error Resume Next
+        Set cat = cats.Add(categoryName)
+        On Error GoTo 0
+
+        If Not cat Is Nothing Then
+            On Error Resume Next
+            cat.Color = StableCategoryColorIndex(categoryName)
+            On Error GoTo 0
+        End If
+    End If
+
+SafeExit:
+End Sub
+
+Private Function StableCategoryColorIndex(ByVal categoryName As String) As Long
+    ' Deterministic 1..25
+    Dim i As Long, h As Long
+    For i = 1 To Len(categoryName)
+        h = (h * 31 + AscW(Mid$(categoryName, i, 1))) And &H7FFFFFFF
+    Next i
+    StableCategoryColorIndex = (h Mod 25) + 1
+End Function
+
+
+' =============================================================================
+' UPSERT / DELETE
+' =============================================================================
+
+Private Function UpsertAllDaySpan(olNS As Object, cal As Object, ByVal existingID As Variant, _
+                                 ByVal StartDate As Date, ByVal EndDate As Date, _
+                                 ByVal subj As String, ByVal bodyTxt As String, _
+                                 Optional ByVal categoryName As String = "") As String
+    On Error GoTo Fail
+
+    Dim ap As Object
+
+    If Nz(existingID, "") <> "" Then
+        On Error Resume Next
+        Set ap = olNS.GetItemFromID(CStr(existingID), cal.StoreID)
+        On Error GoTo 0
+    End If
+
+    If ap Is Nothing Then
+        Set ap = cal.Items.Add(1) ' 1 = olAppointmentItem
+    End If
+
+    With ap
+        .Subject = subj
+        .AllDayEvent = True
+
+        ' End is exclusive for all-day items
+        .Start = DateSerial(Year(StartDate), Month(StartDate), Day(StartDate))
+        .End = DateAdd("d", 1, DateSerial(Year(EndDate), Month(EndDate), Day(EndDate)))
+
+        .BusyStatus = 2          ' 2 = olBusy
+        .ReminderSet = False
+        .Body = bodyTxt
+
+        If Len(categoryName) > 0 Then
+            .Categories = categoryName
+        Else
+            .Categories = ""
+        End If
+
+        .Save
+        UpsertAllDaySpan = .entryID
+    End With
+
+    Exit Function
+
+Fail:
+    Err.Raise Err.Number, Err.Source, "UpsertAllDaySpan: " & Err.Description
+End Function
+
+Private Sub DeleteByID(olNS As Object, cal As Object, ByVal entryID As Variant)
+    If Nz(entryID, "") = "" Then Exit Sub
+    On Error Resume Next
+    Dim it As Object
+    Set it = olNS.GetItemFromID(CStr(entryID), cal.StoreID)
+    If Not it Is Nothing Then it.Delete
+    On Error GoTo 0
+End Sub
+
+
+' =============================================================================
+' FORM HELPERS
+' =============================================================================
+
+Private Function SafeCtl(frm As Form, ctlName As String) As Variant
+    On Error GoTo Missing
+    SafeCtl = frm.Controls(ctlName).value
+    Exit Function
+Missing:
+    SafeCtl = Null
+End Function
+
+Private Function AddDash(ByVal s As String) As String
+    If Len(s) > 0 Then
+        AddDash = s & " - "
+    Else
+        AddDash = ""
+    End If
+End Function
+
+Private Function BuildTitleFromForm(frm As Form) As String
+    ' Title: "stdNumber - Client - QuoteNumber"
+    Dim s As String
+    If Nz(SafeCtl(frm, "stdNumber"), "") <> "" Then s = s & SafeCtl(frm, "stdNumber")
+    If Nz(SafeCtl(frm, "Client"), "") <> "" Then s = AddDash(s) & SafeCtl(frm, "Client")
+    If Nz(SafeCtl(frm, "QuoteNumber"), "") <> "" Then s = AddDash(s) & SafeCtl(frm, "QuoteNumber")
+    If s = "" Then s = "Lab Test"
+    BuildTitleFromForm = s
+End Function
+
+Private Function BuildBodyFromForm(frm As Form) As String
+    ' Body: "SpecimenNumber - SpecimenDescription"
+    Dim s As String
+    If Nz(SafeCtl(frm, "SpecimenNumber"), "") <> "" Then s = s & SafeCtl(frm, "SpecimenNumber")
+    If Nz(SafeCtl(frm, "SpecimenDescription"), "") <> "" Then s = AddDash(s) & SafeCtl(frm, "SpecimenDescription")
+    If s = "" Then s = "Specimen details"
+    BuildBodyFromForm = s
+End Function

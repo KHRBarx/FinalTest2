@@ -1,0 +1,36 @@
+Option Compare Database
+Option Explicit
+
+' === TEMP STAGING SUPPORT (ADD) ===
+'Private Const TEMP_TABLE As String = "zt_Enquiry_temp"
+'
+'Private Function TableExists(tbl As String) As Boolean
+'    Dim tdf As DAO.TableDef
+'    For Each tdf In CurrentDb.TableDefs
+'        If StrComp(tdf.name, tbl, vbTextCompare) = 0 Then TableExists = True: Exit Function
+'    Next
+'End Function
+'
+'Public Sub EnsureEnquiryTemp()
+'    Dim db As DAO.Database: Set db = CurrentDb
+'
+'    If Not TableExists(TEMP_TABLE) Then
+'        ' Clone structure from base (no rows)
+'        db.Execute "SELECT * INTO [" & TEMP_TABLE & "] FROM [t_Enquiries] WHERE 1=0", dbFailOnError
+'        ' Give staging its own primary key so edits are clean & updatable
+'        On Error Resume Next
+'        db.Execute "ALTER TABLE [" & TEMP_TABLE & "] ADD COLUMN StagingID COUNTER PRIMARY KEY", dbFailOnError
+'        On Error GoTo 0
+'    End If
+'End Sub
+'
+'Private Sub ClearEnquiryTemp()
+'    On Error Resume Next
+'    CurrentDb.Execute "DELETE FROM [" & TEMP_TABLE & "]", dbFailOnError
+'    On Error GoTo 0
+'End Sub
+'
+'Private Function WritingToTemp() As Boolean
+'    WritingToTemp = (StrComp(WRITE_TABLE, TEMP_TABLE, vbTextCompare) = 0)
+'End Function
+' === END TEMP STAGING SUPPORT ===

@@ -1,0 +1,108 @@
+Option Compare Database
+Option Explicit
+
+Public Sub CreateDraftQuoteIssueEmail(ByVal frmQuotes As Form, ByVal AttachmentPdfPath As String)
+
+    On Error GoTo EH
+
+    Dim db As DAO.Database
+    Dim rsT As DAO.Recordset
+
+    Dim ContactEmail As String
+    Dim contactName As String
+    Dim ClientName As String
+    Dim StdName As String
+    Dim quoteNum As String
+
+    Dim tmplTo As String, tmplCc As String, tmplBcc As String
+    Dim tmplSubj As String, tmplBody As String
+
+    Dim subj As String, bodyHtml As String, finalHtml As String
+    Dim OutlookApp As Object, mailItem As Object
+
+    '--- Get basic values from the form (matches your current behaviour) ---
+    ContactEmail = Nz(frmQuotes!Email, "")
+    quoteNum = Nz(frmQuotes!QuoteNumber, "")
+
+    On Error Resume Next
+    contactName = Nz(frmQuotes!ContactID.Column(1), "")
+    ClientName = Nz(frmQuotes!ClientID.Column(1), "")
+    StdName = Nz(frmQuotes!StandardID.Column(1), "")
+    On Error GoTo EH
+
+    'Fallback for contact email
+    If Len(ContactEmail) = 0 And Nz(frmQuotes!ContactID, 0) <> 0 Then
+        ContactEmail = Nz(DLookup("EmailAddress", "t_Contacts", "ContactID=" & Nz(frmQuotes!ContactID, 0)), "")
+    End If
+
+    '--- Read template row from t_EmailTemplate ---
+    Set db = CurrentDb
+    Set rsT = db.OpenRecordset( _
+        "SELECT * FROM t_EmailTemplate WHERE TemplateName='Quote_Issue'", dbOpenSnapshot)
+
+    If rsT.EOF Then
+        Err.Raise vbObjectError + 540, , "Email template not found: Quote_Issue"
+    End If
+
+    tmplTo = Nz(rsT!To, "")
+    tmplCc = Nz(rsT!cc, "")
+    tmplBcc = Nz(rsT!BCC, "")
+    tmplSubj = Nz(rsT!Subject, "")
+    tmplBody = Nz(rsT!Body, "")
+
+    rsT.Close
+
+    subj = tmplSubj
+    bodyHtml = tmplBody
+
+    '--- Placeholder replacements ---
+    ReplaceAll subj, "[ContactEmail]", ContactEmail
+    ReplaceAll subj, "[ContactName]", contactName
+    ReplaceAll subj, "[ClientName]", ClientName
+    ReplaceAll subj, "[StandardName]", StdName
+    ReplaceAll subj, "[QuoteNumber]", quoteNum
+
+    ReplaceAll bodyHtml, "[ContactEmail]", ContactEmail
+    ReplaceAll bodyHtml, "[ContactName]", contactName
+    ReplaceAll bodyHtml, "[ClientName]", ClientName
+    ReplaceAll bodyHtml, "[StandardName]", StdName
+    ReplaceAll bodyHtml, "[QuoteNumber]", quoteNum
+
+    '--- Wrap HTML in your standard style ---
+    finalHtml = "<html><head>" & _
+                "<meta http-equiv='Content-Type' content='text/html; charset=utf-8'>" & _
+                "<style type='text/css'>" & _
+                "body, p, span, td {font-family:Ebrima, sans-serif !important;" & _
+                "font-size:10pt !important;}" & _
+                "</style></head><body>" & _
+                bodyHtml & _
+                "</body></html>"
+
+    '--- Outlook draft ---
+    Set OutlookApp = CreateObject("Outlook.Application")
+    Set mailItem = OutlookApp.CreateItem(0)
+
+    With mailItem
+        .To = IIf(Len(tmplTo) > 0, tmplTo, ContactEmail)
+        .cc = tmplCc
+        .BCC = tmplBcc
+        .Subject = subj
+        .htmlBody = finalHtml
+
+        If Len(Dir(AttachmentPdfPath)) > 0 Then
+            .Attachments.Add AttachmentPdfPath
+        End If
+
+        .Display
+    End With
+
+    Exit Sub
+
+EH:
+    MsgBox "Quote email draft failed:" & vbCrLf & Err.Number & " - " & Err.Description, vbExclamation
+End Sub
+
+Private Sub ReplaceAll(ByRef s As String, ByVal findText As String, ByVal replText As String)
+    If Len(s) = 0 Then Exit Sub
+    s = Replace(s, findText, replText)
+End Sub

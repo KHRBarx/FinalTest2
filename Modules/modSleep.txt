@@ -1,0 +1,4 @@
+Option Compare Database
+Option Explicit
+
+Public Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal Milliseconds As LongPtr)

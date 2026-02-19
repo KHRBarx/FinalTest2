@@ -1,0 +1,67 @@
+Public Function GetQuoteFolderPath(ByVal QuoteID As Long) As String
+    Dim basePath As String
+    Dim quoteNum As String
+    Dim ClientName As String
+    Dim standardNum As String
+    Dim fullFolderName As String
+    Dim folderPath As String
+
+    basePath = Nz(TempVars!QuoteSaveLocation, "")
+    If Len(basePath) = 0 Then
+        MsgBox "Base quotation folder not set in admin_settings.", vbCritical
+        Exit Function
+    End If
+    If Right(basePath, 1) <> "\" Then basePath = basePath & "\"
+
+    '=== Attempt to fetch data safely ===
+    quoteNum = Nz(DLookup("QuoteNumber", "t_Quotations", "QuoteID=" & QuoteID), "")
+    
+    Dim ClientID As Long
+    ClientID = Nz(DLookup("ClientID", "t_Quotations", "QuoteID=" & QuoteID), 0)
+    If ClientID <> 0 Then
+        ClientName = Nz(DLookup("Client", "t_Clients", "ClientID=" & ClientID), "")
+    Else
+        ClientName = ""
+    End If
+
+
+    ' Get the true stdNumber (safe lookup)
+    standardNum = Nz(GetStandardNumber(QuoteID), "")
+
+    '=== Handle blanks by substituting placeholders ===
+    If Len(quoteNum) = 0 Then quoteNum = "Untitled"
+    If Len(ClientName) = 0 Then ClientName = "Untitled"
+    If Len(standardNum) = 0 Then standardNum = "Untitled"
+
+    '=== Clean invalid filename characters ===
+    ClientName = Replace(ClientName, "\", "-")
+    ClientName = Replace(ClientName, "/", "-")
+    ClientName = Replace(ClientName, ":", "-")
+    ClientName = Replace(ClientName, "*", "-")
+    ClientName = Replace(ClientName, "?", "-")
+    ClientName = Replace(ClientName, """", "'")
+    ClientName = Replace(ClientName, "<", "(")
+    ClientName = Replace(ClientName, ">", ")")
+    ClientName = Replace(ClientName, "|", "-")
+
+    standardNum = Replace(standardNum, "\", "-")
+    standardNum = Replace(standardNum, "/", "-")
+    standardNum = Replace(standardNum, ":", "-")
+    standardNum = Replace(standardNum, "*", "-")
+    standardNum = Replace(standardNum, "?", "-")
+    standardNum = Replace(standardNum, """", "'")
+    standardNum = Replace(standardNum, "<", "(")
+    standardNum = Replace(standardNum, ">", ")")
+    standardNum = Replace(standardNum, "|", "-")
+
+    '=== Build folder name ===
+    fullFolderName = Trim(quoteNum)
+    fullFolderName = fullFolderName & " - " & ClientName & " - " & standardNum
+
+    folderPath = basePath & fullFolderName & "\"
+
+    '=== Create folder if missing ===
+    If Dir(folderPath, vbDirectory) = "" Then MkDir folderPath
+
+    GetQuoteFolderPath = folderPath
+End Function

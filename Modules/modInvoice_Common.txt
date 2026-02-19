@@ -1,0 +1,740 @@
+Option Compare Database
+Option Explicit
+
+Public Const INVOICE_TYPE_DEPOSIT As String = "DEPOSIT"
+Public Const INVOICE_TYPE_PART As String = "PART"
+Public Const INVOICE_TYPE_FINAL As String = "FINAL"
+Public Const INVOICE_TYPE_SUPPLEMENTARY As String = "SUPPLEMENTARY"
+Public Const INVOICE_TYPE_CREDIT As String = "CREDIT"
+Public Const INVOICE_TYPE_REFUND As String = "REFUND"
+
+Public Const INVOICE_NOTES_FIELD As String = "InvoiceNotes"
+
+Public Function NormalizeInvoiceType(ByVal invType As String) As String
+    Dim t As String
+    t = UCase$(Trim$(invType))
+
+    Select Case t
+        Case "DEPOSIT", "D", "D-INV"
+            NormalizeInvoiceType = INVOICE_TYPE_DEPOSIT
+        Case "PART", "STAGED", "P", "P-INV", "S", "S-INV"
+            NormalizeInvoiceType = INVOICE_TYPE_PART
+        Case "FINAL", "F", "F-INV"
+            NormalizeInvoiceType = INVOICE_TYPE_FINAL
+        Case "SUPPLEMENTARY", "SUPP"
+            NormalizeInvoiceType = INVOICE_TYPE_SUPPLEMENTARY
+        Case "CREDIT", "CRED", "CREDIT NOTE"
+            NormalizeInvoiceType = INVOICE_TYPE_CREDIT
+        Case "REFUND", "RFD", "REF"
+            NormalizeInvoiceType = INVOICE_TYPE_REFUND
+        Case Else
+            NormalizeInvoiceType = t
+    End Select
+End Function
+
+'==============================================================
+' Core: single unified sequence
+'   - Table: t_InvoiceSequences
+'   - Row:  Prefix = 'BASE'
+'   - Col:  LastNumber = last used base number (e.g. 10012)
+'   - All invoice types share this one running number.
+'==============================================================
+Public Function GetNextBaseNumber() As Long
+    On Error GoTo ErrHandler
+
+    Dim db As DAO.Database
+    Dim tdf As DAO.TableDef
+    Dim rs As DAO.Recordset
+    Dim fldKey As String
+    Dim fldNum As String
+    Dim sql As String
+    Dim fld As DAO.Field
+
+    Set db = CurrentDb
+
+    '--------------------------------------------------
+    ' 1) Ensure t_InvoiceSequences exists
+    '    (we'll default to Series/lastNumber)
+    '--------------------------------------------------
+    If DCount("*", "MSysObjects", "Name='t_InvoiceSequences' AND Type In (1,4,6)") = 0 Then
+        db.Execute _
+            "CREATE TABLE t_InvoiceSequences (" & _
+            "Series TEXT(10) CONSTRAINT PK_t_InvoiceSequences PRIMARY KEY, " & _
+            "lastNumber LONG);", _
+            dbFailOnError
+    End If
+
+    Set tdf = db.TableDefs("t_InvoiceSequences")
+
+    '--------------------------------------------------
+    ' 2) Detect actual field names:
+    '    - key field:  Series OR Prefix
+    '    - number  :   LastNumber OR lastNumber
+    '--------------------------------------------------
+    fldKey = ""
+    fldNum = ""
+
+    For Each fld In tdf.fields
+        Select Case fld.Name
+            Case "Series", "Prefix"
+                fldKey = fld.Name
+            Case "LastNumber", "lastNumber"
+                fldNum = fld.Name
+        End Select
+    Next fld
+
+    ' Fallbacks, in case names are odd
+    If fldKey = "" Then fldKey = tdf.fields(0).Name
+    If fldNum = "" Then
+        If tdf.fields.Count > 1 Then
+            fldNum = tdf.fields(1).Name
+        Else
+            fldNum = fldKey   ' worst-case, but avoids crash
+        End If
+    End If
+
+    '--------------------------------------------------
+    ' 3) Get or create the BASE row
+    '--------------------------------------------------
+    sql = "SELECT * FROM t_InvoiceSequences WHERE " & fldKey & "='BASE';"
+    Set rs = db.OpenRecordset(sql, dbOpenDynaset)
+
+    If rs.EOF Then
+        rs.AddNew
+        rs.fields(fldKey).value = "BASE"
+        rs.fields(fldNum).value = 10000    ' last number BEFORE first real invoice
+        rs.Update
+        rs.Requery
+        rs.MoveFirst
+    End If
+
+    '--------------------------------------------------
+    ' 4) Increment and return the next base number
+    '--------------------------------------------------
+    rs.Edit
+    rs.fields(fldNum).value = Nz(rs.fields(fldNum).value, 10000) + 1
+    rs.Update
+
+    GetNextBaseNumber = rs.fields(fldNum).value
+
+CleanUp:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set tdf = Nothing
+    Set db = Nothing
+    Exit Function
+
+ErrHandler:
+    MsgBox "Error in GetNextBaseNumber: " & Err.Number & " - " & Err.Description, vbExclamation
+    GetNextBaseNumber = 0
+    Resume CleanUp
+End Function
+
+'==============================================================
+' Ensure an Order has a base number; allocate if missing.
+'   - Reads t_Orders.InvoiceNumber
+'   - If blank/zero: gets next base and updates t_Orders.
+'   - Returns numeric base (e.g. 10012)
+'==============================================================
+Public Function EnsureBaseNumberForOrder(ByVal OrderID As Long) As Long
+    On Error GoTo ErrHandler
+
+    Dim v As Variant
+    Dim baseNum As Long
+    Dim db As DAO.Database
+
+    If OrderID <= 0 Then
+        Err.Raise vbObjectError + 7001, , "EnsureBaseNumberForOrder: invalid OrderID."
+    End If
+
+    v = DLookup("InvoiceNumber", "t_Orders", "OrderID=" & OrderID)
+    If Not IsNull(v) Then
+        If Len(Trim$(v & "")) > 0 Then
+            baseNum = CLng(v)
+        End If
+    End If
+
+    If baseNum = 0 Then
+        baseNum = GetNextBaseNumber()
+        Set db = CurrentDb
+        db.Execute _
+            "UPDATE t_Orders " & _
+            "SET InvoiceNumber = '" & Format$(baseNum, "00000") & "' " & _
+            "WHERE OrderID = " & OrderID & ";", _
+            dbFailOnError
+    End If
+
+    EnsureBaseNumberForOrder = baseNum
+
+CleanUp:
+    Set db = Nothing
+    Exit Function
+
+ErrHandler:
+    MsgBox "Error in EnsureBaseNumberForOrder: " & Err.Number & " - " & Err.Description, vbExclamation
+    Resume CleanUp
+End Function
+
+
+'==============================================================
+' Generate consistent invoice numbers per Order
+'
+'   D-INV10001        (Deposit)
+'   F-INV10001        (Final)
+'   P-INV10001-01     (Part/Staged)
+'   CRED10001-01      (Credit Note)
+'   INV10001          (Fallback generic)
+'
+' All types share the same BASE number from the Order.
+'==============================================================
+Public Function GenerateInvoiceREFForOrder( _
+    ByVal OrderID As Long, _
+    ByVal invType As String) As String
+
+    On Error GoTo ErrHandler
+
+    Dim baseNum As Long
+    Dim kind As String
+    Dim invRef As String
+
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim sql As String
+
+    Dim prefixBase As String
+    Dim s As String
+    Dim tail As String
+    Dim maxSuffix As Long
+    Dim n As Long
+    Dim nextSeq As Long
+
+    ' One base number per order
+    baseNum = EnsureBaseNumberForOrder(OrderID)
+    kind = NormalizeInvoiceType(invType)
+
+    Select Case kind
+
+        '----------------------------------------
+        ' DEPOSIT  -> D-INV10001
+        '----------------------------------------
+        Case INVOICE_TYPE_DEPOSIT
+            invRef = "D-INV" & Format$(baseNum, "00000")
+
+        '----------------------------------------
+        ' FINAL    -> F-INV10001
+        '----------------------------------------
+        Case INVOICE_TYPE_FINAL
+            invRef = "F-INV" & Format$(baseNum, "00000")
+
+        '----------------------------------------
+        ' STAGED/PART -> P-INV10001-01, -02, ...
+        '----------------------------------------
+        Case INVOICE_TYPE_PART
+
+            prefixBase = "P-INV" & Format$(baseNum, "00000") & "-"
+            maxSuffix = 0
+
+            Set db = CurrentDb
+            sql = "SELECT InvoiceREF FROM t_Invoices " & _
+                  "WHERE OrderID = " & OrderID & " AND InvoiceREF IS NOT NULL;"
+            Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+
+            Do While Not rs.EOF
+                s = Nz(rs!InvoiceREF, "")
+                ' Only consider refs for THIS order & base, e.g. P-INV10001-01
+                If Left$(s, Len(prefixBase)) = prefixBase Then
+                    tail = Right$(s, 2)
+                    If IsNumeric(tail) Then
+                        n = CLng(tail)
+                        If n > maxSuffix Then
+                            maxSuffix = n
+                        End If
+                    End If
+                End If
+                rs.MoveNext
+            Loop
+
+            nextSeq = maxSuffix + 1
+            invRef = prefixBase & Format$(nextSeq, "00")
+
+        '----------------------------------------
+        ' CREDIT NOTES -> CRED10001-01, -02, ...
+        '----------------------------------------
+        Case INVOICE_TYPE_CREDIT
+
+            prefixBase = "CRED" & Format$(baseNum, "00000") & "-"
+            maxSuffix = 0
+
+            Set db = CurrentDb
+            sql = "SELECT InvoiceREF FROM t_Invoices " & _
+                  "WHERE OrderID = " & OrderID & " AND InvoiceREF IS NOT NULL;"
+            Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+
+            Do While Not rs.EOF
+                s = Nz(rs!InvoiceREF, "")
+                ' Only consider refs for THIS order & base, e.g. CRED10001-01
+                If Left$(s, Len(prefixBase)) = prefixBase Then
+                    tail = Right$(s, 2)
+                    If IsNumeric(tail) Then
+                        n = CLng(tail)
+                        If n > maxSuffix Then
+                            maxSuffix = n
+                        End If
+                    End If
+                End If
+                rs.MoveNext
+            Loop
+
+            nextSeq = maxSuffix + 1
+            invRef = prefixBase & Format$(nextSeq, "00")
+
+        '----------------------------------------
+        ' Fallback generic -> INV10001
+        '----------------------------------------
+        Case Else
+            invRef = "INV" & Format$(baseNum, "00000")
+    End Select
+
+    GenerateInvoiceREFForOrder = invRef
+
+CleanUp:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+    Exit Function
+
+ErrHandler:
+    MsgBox "Error generating invoice ref: " & Err.Number & " - " & Err.Description, vbExclamation
+    GenerateInvoiceREFForOrder = "ERR" & Format$(baseNum, "00000")
+    Resume CleanUp
+End Function
+
+'==============================================================
+' Generate a reference WITHOUT an Order context
+' (standalone invoices, if you ever have them)
+' Still uses the single BASE sequence.
+'==============================================================
+Public Function GenerateInvoiceREF(ByVal invType As String) As String
+    On Error GoTo ErrHandler
+
+    Dim baseNum As Long
+    Dim Prefix As String
+    Dim kind As String
+
+    baseNum = GetNextBaseNumber()
+    kind = NormalizeInvoiceType(invType)
+
+    Select Case kind
+        Case INVOICE_TYPE_DEPOSIT: Prefix = "D-INV"
+        Case INVOICE_TYPE_FINAL:   Prefix = "F-INV"
+        Case INVOICE_TYPE_PART:    Prefix = "P-INV"
+        Case INVOICE_TYPE_CREDIT:  Prefix = "CRED"
+        Case Else:                 Prefix = "INV"
+    End Select
+
+    GenerateInvoiceREF = Prefix & Format$(baseNum, "00000")
+    Exit Function
+
+ErrHandler:
+    MsgBox "Error generating invoice number: " & Err.Number & " - " & Err.Description, vbExclamation, "Invoice REF Error"
+    GenerateInvoiceREF = "ERR" & Format$(baseNum, "00000")
+End Function
+
+
+'==============================================================
+' Logging helpers: x_INVNumbers
+' These do NOT drive the sequence; they are audit only.
+'==============================================================
+Public Sub LogInvoiceNumber( _
+    ByVal invRef As String, _
+    ByVal invDate As Variant, _
+    ByVal InvoiceID As Long, _
+    ByVal OrderID As Long, _
+    Optional ByVal userName As Variant)
+
+    On Error GoTo ErrHandler
+
+    Dim db As DAO.Database
+    Dim sql As String
+    Dim usrValue As String
+    Dim dtValue As String
+
+    Set db = CurrentDb
+
+    ' Username
+    If IsMissing(userName) Or IsNull(userName) Then
+        usrValue = Environ$("Username")
+    Else
+        usrValue = CStr(userName)
+    End If
+
+    ' Date
+    If IsDate(invDate) Then
+        dtValue = "#" & Format$(invDate, "yyyy-mm-dd hh:nn:ss") & "#"
+    Else
+        dtValue = "Now()"
+    End If
+
+    sql = "INSERT INTO x_INVNumbers (INVNumber, INVDate, UserName, InvoiceID, OrderID, CreatedOn) " & _
+          "SELECT '" & Replace(invRef, "'", "''") & "', " & dtValue & ", '" & Replace(usrValue, "'", "''") & "', " & _
+                  InvoiceID & ", " & OrderID & ", Now() " & _
+          "WHERE NOT EXISTS (SELECT 1 FROM x_INVNumbers WHERE INVNumber='" & Replace(invRef, "'", "''") & "');"
+
+    db.Execute sql, dbFailOnError
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Error logging invoice number: " & Err.Description, vbExclamation, "x_INVNumbers"
+End Sub
+
+
+Public Sub AddInvoiceNumberRecord( _
+    ByVal invID As Long, _
+    ByVal invRef As String, _
+    Optional ByVal invDate As Variant, _
+    Optional ByVal userName As Variant)
+
+    On Error GoTo ErrHandler
+
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim usrValue As String
+    Dim dtValue As Date
+    Dim sql As String
+
+    Set db = CurrentDb
+
+    usrValue = IIf(IsMissing(userName) Or IsNull(userName), Environ$("Username"), CStr(userName))
+    If IsMissing(invDate) Or IsNull(invDate) Or Not IsDate(invDate) Then
+        dtValue = Now()
+    Else
+        dtValue = CDate(invDate)
+    End If
+
+    ' 1) Try to find existing record for this InvoiceID
+    Set rs = db.OpenRecordset("SELECT * FROM x_INVNumbers WHERE InvoiceID=" & invID & ";", dbOpenDynaset)
+
+    If rs.EOF Then
+        ' 2) Not found -> INSERT new record
+        On Error Resume Next
+        rs.AddNew
+        rs!INVNumber = invRef
+        rs!invDate = dtValue
+        rs!userName = usrValue
+        rs!InvoiceID = invID
+        rs!CreatedOn = Now()
+        rs.Update
+
+        If Err.Number = 3022 Then
+            ' Race / duplicate: reload and fall through to update
+            Err.Clear
+            rs.Close
+            Set rs = db.OpenRecordset("SELECT * FROM x_INVNumbers WHERE InvoiceID=" & invID & ";", dbOpenDynaset)
+        End If
+        On Error GoTo ErrHandler
+    End If
+
+    If Not rs.EOF Then
+        ' 3) Found -> UPDATE existing record
+        rs.Edit
+        rs!INVNumber = invRef
+        rs!invDate = dtValue
+        rs!userName = usrValue
+        rs!CreatedOn = Now()
+        rs.Update
+    End If
+
+    rs.Close
+    Set rs = Nothing
+
+    ' 4) If CREDIT, sync CreditRef
+    If Left$(UCase$(invRef), 4) = "CRED" Then
+        sql = "UPDATE t_CreditNotes SET CreditRef='" & Replace(invRef, "'", "''") & _
+              "' WHERE InvoiceID=" & invID & ";"
+        db.Execute sql, dbFailOnError
+    End If
+
+    Set db = Nothing
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Failed to add/update invoice number record: " & Err.Number & " - " & Err.Description, vbExclamation, "x_INVNumbers"
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+End Sub
+
+
+'==============================================================
+' Supplementary Invoice REF:
+'   Based on the DEPOSIT invoice ref for the Order:
+'     D-INV10027  -> S-INV10027-1, S-INV10027-2, ...
+' Returns "" if no DEPOSIT invoice exists or ref format unexpected.
+'==============================================================
+Public Function GenerateSupplementaryInvoiceREFForOrder(ByVal OrderID As Long) As String
+    On Error GoTo ErrHandler
+
+    Dim depRef As String
+    Dim basePart As String
+    Dim nextSeq As Long
+
+    depRef = Nz(DLookup("InvoiceREF", "t_Invoices", _
+                        "OrderID=" & OrderID & " AND InvoiceType='DEPOSIT'"), "")
+
+    depRef = Trim$(depRef)
+    If Len(depRef) = 0 Then Exit Function
+
+    ' Expect: D-INVxxxxx (your example: D-INV10027)
+    If UCase$(Left$(depRef, 5)) <> "D-INV" Then Exit Function
+
+    basePart = Mid$(depRef, 6) ' everything after "D-INV"
+    basePart = Trim$(basePart)
+    If Len(basePart) = 0 Then Exit Function
+
+    ' If a dash exists for any reason, take up to the first dash.
+    ' (keeps this robust without changing your intended format)
+    If InStr(1, basePart, "-", vbTextCompare) > 0 Then
+        basePart = Left$(basePart, InStr(1, basePart, "-", vbTextCompare) - 1)
+    End If
+
+    nextSeq = GetNextSupplementarySeq(basePart)
+
+    GenerateSupplementaryInvoiceREFForOrder = "S-INV" & basePart & "-" & CStr(nextSeq)
+    Exit Function
+
+ErrHandler:
+    MsgBox "Error generating supplementary invoice ref: " & Err.Number & " - " & Err.Description, vbExclamation
+    GenerateSupplementaryInvoiceREFForOrder = ""
+End Function
+
+
+'==============================================================
+' Finds next suffix for S-INV<basePart>-n by looking at existing
+' SUPPLEMENTARY invoices.
+'==============================================================
+Private Function GetNextSupplementarySeq(ByVal basePart As String) As Long
+    On Error GoTo ErrHandler
+
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim sql As String
+    Dim patt As String
+    Dim maxSeq As Long
+
+    patt = "S-INV" & Replace(basePart, "'", "''") & "-*"
+
+    sql = _
+        "SELECT Max(Val(Mid([InvoiceREF], InStrRev([InvoiceREF], '-')+1))) AS MaxSeq " & _
+        "FROM t_Invoices " & _
+        "WHERE InvoiceType='SUPPLEMENTARY' " & _
+        "  AND InvoiceREF Like '" & patt & "';"
+
+    Set db = CurrentDb
+    Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+
+    maxSeq = Nz(rs!maxSeq, 0)
+    rs.Close
+
+    GetNextSupplementarySeq = maxSeq + 1
+    Exit Function
+
+ErrHandler:
+    GetNextSupplementarySeq = 1
+End Function
+
+
+'==============================================================
+' Mark invoice as PAID
+'   - Does NOT change InvoiceREF.
+'   - Appends "Paid Ref" into INVOICE_NOTES_FIELD when provided.
+'==============================================================
+Public Sub MarkInvoiceAsPaid( _
+    ByVal invID As Long, _
+    ByVal refText As String, _
+    ByVal dtPaid As Date, _
+    Optional ByVal PaidBy As String = "")
+
+    On Error GoTo ErrHandler
+
+    Dim db As DAO.Database
+    Dim sql As String
+    Dim paidBySQL As String
+    Dim notesSql As String
+
+    Set db = CurrentDb
+
+    paidBySQL = IIf(Len(Trim$(PaidBy)) > 0, "'" & Replace(PaidBy, "'", "''") & "'", "Null")
+
+'    If Len(Trim$(refText)) > 0 Then
+'        notesSql = ", " & INVOICE_NOTES_FIELD & " = Nz(" & INVOICE_NOTES_FIELD & ",'') & ' | Paid Ref: " & _
+'                   Replace(refText, "'", "''") & "'"
+'    Else
+'        notesSql = ""
+'    End If
+
+    sql = "UPDATE t_Invoices SET " & _
+          "PaymentDate = #" & Format$(dtPaid, "yyyy-mm-dd hh:nn:ss") & "#, " & _
+          "PaidBy = " & paidBySQL & _
+          "WHERE InvoiceID = " & invID & ";"
+
+    db.Execute sql, dbFailOnError
+
+CleanUp:
+    Set db = Nothing
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Could not mark invoice as paid: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume CleanUp
+End Sub
+
+'==============================================================
+' Template path resolution (table-driven, optional fallback)
+'==============================================================
+Public Function GetTemplatePathByDescription(ByVal desc As String, Optional ByVal optionalFallback As String = "") As String
+    Dim v As Variant
+
+    v = DLookup("TemplatePath", "t_TemplateDocuments", "Description = '" & Replace(desc, "'", "''") & "'")
+    If IsNull(v) Or Len(Trim$(v & "")) = 0 Then
+        GetTemplatePathByDescription = optionalFallback
+    Else
+        GetTemplatePathByDescription = CStr(v)
+    End If
+End Function
+
+'==============================================================
+' Shared lookup helpers
+'==============================================================
+Public Function GetOrderIDForInvoice(ByVal InvoiceID As Long) As Long
+    Dim v As Variant
+    v = DLookup("OrderID", "t_Invoices", "InvoiceID=" & InvoiceID)
+    If IsNull(v) Then GetOrderIDForInvoice = 0 Else GetOrderIDForInvoice = CLng(v)
+End Function
+
+Public Function GetQuoteIDForInvoice(ByVal InvoiceID As Long) As Long
+    Dim v As Variant
+    v = DLookup("QuoteID", "t_Invoices", "InvoiceID=" & InvoiceID)
+    If IsNull(v) Then GetQuoteIDForInvoice = 0 Else GetQuoteIDForInvoice = CLng(v)
+End Function
+
+Public Function GetClientIDForInvoice(ByVal InvoiceID As Long) As Long
+    Dim v As Variant
+    v = DLookup("ClientID", "t_Invoices", "InvoiceID=" & InvoiceID)
+    If IsNull(v) Then GetClientIDForInvoice = 0 Else GetClientIDForInvoice = CLng(v)
+End Function
+
+Public Function GetLatestDepositInvoiceRefForOrder(ByVal OrderID As Long) As String
+    Dim rs As DAO.Recordset
+    Dim sql As String
+
+    GetLatestDepositInvoiceRefForOrder = ""
+
+    If OrderID = 0 Then Exit Function
+
+    sql = "SELECT TOP 1 InvoiceREF " & _
+          "FROM t_Invoices " & _
+          "WHERE OrderID=" & OrderID & " AND InvoiceType='DEPOSIT' " & _
+          "ORDER BY DateIssued DESC, InvoiceID DESC;"
+
+    Set rs = CurrentDb.OpenRecordset(sql, dbOpenSnapshot)
+    If Not rs.EOF Then
+        GetLatestDepositInvoiceRefForOrder = Nz(rs!InvoiceREF, "")
+    End If
+    rs.Close
+    Set rs = Nothing
+End Function
+
+'==============================================================
+' Shared validation helpers (UI prompts remain in forms)
+'==============================================================
+Public Function RequirePurchaseOrderRef(ByVal PurchaseOrderRef As Variant, ByRef outMessage As String) As Boolean
+    If Len(Trim$(PurchaseOrderRef & "")) = 0 Then
+        outMessage = "Purchase order reference is required."
+        RequirePurchaseOrderRef = False
+    Else
+        outMessage = ""
+        RequirePurchaseOrderRef = True
+    End If
+End Function
+
+Public Function RequireMandatoryInvoiceFields(ByVal fieldValues As Object, ByVal requiredFields As Variant, ByRef outMessage As String) As Boolean
+    Dim Missing As String
+    Dim i As Long
+    Dim key As String
+    Dim valueText As String
+
+    If fieldValues Is Nothing Then
+        outMessage = "Required fields are missing."
+        RequireMandatoryInvoiceFields = False
+        Exit Function
+    End If
+
+    For i = LBound(requiredFields) To UBound(requiredFields)
+        key = CStr(requiredFields(i))
+        If fieldValues.exists(key) Then
+            valueText = Trim$(fieldValues(key) & "")
+            If Len(valueText) = 0 Then
+                If Len(Missing) > 0 Then Missing = Missing & vbCrLf
+                Missing = Missing & key
+            End If
+        Else
+            If Len(Missing) > 0 Then Missing = Missing & vbCrLf
+            Missing = Missing & key
+        End If
+    Next i
+
+    outMessage = Missing
+    RequireMandatoryInvoiceFields = (Len(Missing) = 0)
+End Function
+
+
+
+Public Function SqlText(ByVal s As String) As String
+    SqlText = "'" & Replace(Nz(s, ""), "'", "''") & "'"
+End Function
+
+Public Function GetNextRefundRef(ByVal ParentInvoiceREF As String) As String
+    On Error GoTo ErrHandler
+    Dim db As DAO.Database, rs As DAO.Recordset
+    Dim sql As String, pfx As String, s As String
+    Dim n As Long, maxN As Long
+
+    ParentInvoiceREF = Trim$(Nz(ParentInvoiceREF, ""))
+    If Len(ParentInvoiceREF) = 0 Then Exit Function
+
+    pfx = ParentInvoiceREF & "_R"
+    sql = "SELECT InvoiceREF FROM t_Invoices WHERE InvoiceREF Like " & SqlText(pfx & "##")
+    Set db = CurrentDb
+    Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+
+    maxN = 0
+    Do While Not rs.EOF
+        s = Nz(rs!InvoiceREF, "")
+        If Len(s) >= Len(pfx) + 2 Then
+            n = val(Right$(s, 2))
+            If n > maxN Then maxN = n
+        End If
+        rs.MoveNext
+    Loop
+    rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+
+    GetNextRefundRef = pfx & Format$(maxN + 1, "00")
+    Exit Function
+ErrHandler:
+    GetNextRefundRef = vbNullString
+End Function
+
+Public Function EffectiveQuoteValue(ByVal OrderID As Long, ByVal QuoteValue As Currency) As Currency
+    Dim r As Currency
+    If OrderID > 0 Then
+        r = Nz(DLookup("RefundValue", "t_Orders", "OrderID=" & CLng(OrderID)), 0)
+    Else
+        r = 0
+    End If
+    EffectiveQuoteValue = QuoteValue - r
+End Function

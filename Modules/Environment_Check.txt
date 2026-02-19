@@ -1,0 +1,179 @@
+Option Compare Database
+Option Explicit
+
+Public Sub RunEnvCheck()
+    On Error GoTo EH
+    Dim bePath As String, fePath As String
+    bePath = PickFile("Select the BACKEND (.accdb)", "Access DB (*.accdb),*.accdb")
+    If Len(bePath) = 0 Then Exit Sub
+
+    If MsgBox("Also check a FRONT-END file (ACCDB/ACCDE)?", vbYesNo + vbQuestion) = vbYes Then
+        fePath = PickFile("Select the FRONT-END (.accdb/.accde)", _
+                          "Access FE (*.accdb;*.accde),*.accdb;*.accde")
+    End If
+
+    Dim rpt As String
+    rpt = "Access Environment Check" & vbCrLf & String(60, "-") & vbCrLf
+    rpt = rpt & "Timestamp: " & Now & vbCrLf
+    rpt = rpt & "Machine: " & Environ$("COMPUTERNAME") & "  User: " & Environ$("USERNAME") & vbCrLf & vbCrLf
+
+    '---- App options (shared/exclusive, record-level) ----
+    Dim openMode As Variant, recLock As Variant
+    openMode = SafeGetOption("Default Open Mode", -1)                      ' -1 = unknown
+    recLock = SafeGetOption("Open databases by using record-level locking", Null)
+
+    rpt = rpt & "[Access Options]" & vbCrLf
+    rpt = rpt & "Default open mode: " & IIf(Nz(openMode, 0) = 0, "Shared", "Exclusive") & vbCrLf
+    rpt = rpt & "Record-level locking: " & IIf(Nz(recLock, False), "ON", "OFF") & vbCrLf & vbCrLf
+
+    '---- Backend file & folder checks ----
+    rpt = rpt & "[Backend]" & vbCrLf & "Path: " & bePath & vbCrLf
+    rpt = rpt & "UNC vs Drive: " & IIf(IsUNCPath(bePath), "UNC", "Drive letter / local") & vbCrLf
+    rpt = rpt & "Read-only attribute: " & IIf((GetAttr(bePath) And vbReadOnly) <> 0, "YES", "no") & vbCrLf
+
+    Dim beFolder As String: beFolder = Left$(bePath, InStrRev(bePath, "\") - 1)
+    rpt = rpt & "Folder: " & beFolder & vbCrLf
+
+    'Lock file present?
+    Dim lockPath As String
+    lockPath = Replace$(bePath, ".accdb", ".laccdb", , , vbTextCompare)
+    rpt = rpt & ".laccdb present now: " & IIf(Dir(lockPath) <> "", "YES (" & FileDateTime(lockPath) & ")", "no") & vbCrLf
+
+    'Folder create/delete test
+    Dim okWrite As Boolean: okWrite = TestCreateDelete(beFolder)
+    rpt = rpt & "Create/Delete test in folder: " & IIf(okWrite, "PASS", "FAIL") & vbCrLf & vbCrLf
+
+    '---- Front-end link paths (optional) ----
+    If Len(fePath) > 0 Then
+        rpt = rpt & "[Front-end]" & vbCrLf & "Path: " & fePath & vbCrLf
+        rpt = rpt & "Type: " & IIf(LCase$(Right$(fePath, 5)) = ".accde", "ACCDE", "ACCDB") & vbCrLf
+
+        Dim extDb As DAO.Database, tdf As DAO.TableDef, con As String, dbPath As String
+        Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
+        Set extDb = DBEngine.Workspaces(0).OpenDatabase(fePath, False, True) 'read-only
+
+        For Each tdf In extDb.TableDefs
+            con = Nz(tdf.connect, "")
+            If Len(con) > 0 Then
+                dbPath = ExtractDbPathFromConnect(con)
+                If Len(dbPath) > 0 Then
+                    If Not dict.exists(dbPath) Then dict.Add dbPath, IIf(IsUNCPath(dbPath), "UNC", "Drive/local")
+                End If
+            End If
+        Next tdf
+        extDb.Close
+
+        If dict.Count = 0 Then
+            rpt = rpt & "Linked paths: (none found)" & vbCrLf
+        Else
+            rpt = rpt & "Linked paths found:" & vbCrLf
+            Dim k As Variant
+            For Each k In dict.keys
+                rpt = rpt & " - " & k & "   [" & dict(k) & "]" & vbCrLf
+            Next k
+        End If
+        rpt = rpt & vbCrLf
+    End If
+
+    '---- Try opening backend shared (light check) ----
+    rpt = rpt & "[Backend open test]" & vbCrLf
+    Dim beDb As DAO.Database
+    On Error Resume Next
+    Set beDb = DBEngine.Workspaces(0).OpenDatabase(bePath, False, False, ";PWD=") 'no pwd
+    If Err.Number <> 0 Then
+        rpt = rpt & "OpenDatabase shared: FAIL (" & Err.Number & " - " & Err.Description & ")" & vbCrLf
+        Err.Clear
+    Else
+        rpt = rpt & "OpenDatabase shared: PASS" & vbCrLf
+        beDb.Close
+    End If
+    On Error GoTo EH
+
+    '---- Write report to Desktop ----
+    Dim outPath As String
+    outPath = DesktopPath() & "\Access_EnvCheck_" & Format(Now, "yyyymmdd_hhnnss") & ".txt"
+    WriteAllText outPath, rpt
+    Shell "notepad.exe """ & outPath & """", vbNormalFocus
+
+    MsgBox "Environment check complete." & vbCrLf & "Report: " & outPath, vbInformation
+    Exit Sub
+EH:
+    MsgBox "Env check error " & Err.Number & ": " & Err.Description, vbExclamation
+End Sub
+
+'----- Helpers -----
+Private Function PickFile(prompt As String, filter As String) As String
+    With Application.FileDialog(msoFileDialogFilePicker)
+        .Title = prompt
+        .AllowMultiSelect = False
+        .Filters.Clear
+        .Filters.Add Split(filter, "(")(0), Split(filter, ",")(1)
+        If .Show = -1 Then
+            PickFile = .SelectedItems(1)
+        End If
+    End With
+End Function
+
+Private Function IsUNCPath(p As String) As Boolean
+    IsUNCPath = (Left$(p, 2) = "\\")
+End Function
+
+Private Function TestCreateDelete(folder As String) As Boolean
+    On Error GoTo EH
+    Dim f As String
+    f = folder & "\_perm_test_" & Format(Now, "yyyymmdd_hhnnss") & ".tmp"
+    Dim ff As Integer: ff = FreeFile
+    Open f For Output As #ff
+    Print #ff, "test"
+    Close #ff
+    Kill f
+    TestCreateDelete = True
+    Exit Function
+EH:
+    TestCreateDelete = False
+End Function
+
+Private Function ExtractDbPathFromConnect(connect As String) As String
+    'e.g. "MS Access;DATABASE=\\Server\Share\BackEnd.accdb"
+    Dim p As Long: p = InStr(1, connect, "DATABASE=", vbTextCompare)
+    If p > 0 Then
+        ExtractDbPathFromConnect = Mid$(connect, p + 9)
+    End If
+End Function
+
+Private Function SafeGetOption(optName As String, Optional defaultValue As Variant = Null) As Variant
+    On Error Resume Next
+    SafeGetOption = Application.GetOption(optName)
+    If Err.Number <> 0 Then
+        Err.Clear
+        SafeGetOption = defaultValue   ' fall back if option name not found (different language/version)
+    End If
+End Function
+
+Private Function DesktopPath() As String
+    On Error Resume Next
+    'Use the real Desktop, even if redirected (e.g., OneDrive)
+    DesktopPath = CreateObject("WScript.Shell").SpecialFolders("Desktop")
+    If Len(DesktopPath) = 0 Then
+        'Fallbacks
+        DesktopPath = Environ$("USERPROFILE") & "\Desktop"
+        If Dir(DesktopPath, vbDirectory) = "" Then
+            DesktopPath = Environ$("TEMP")
+        End If
+    End If
+End Function
+
+Private Sub SafeMkDir(ByVal folder As String)
+    On Error Resume Next
+    If Len(folder) = 0 Then Exit Sub
+    If Dir(folder, vbDirectory) = "" Then MkDir folder
+End Sub
+
+Private Sub WriteAllText(path As String, content As String)
+    Dim ff As Integer
+    SafeMkDir Left$(path, InStrRev(path, "\") - 1)
+    ff = FreeFile
+    Open path For Output As #ff
+    Print #ff, content
+    Close #ff
+End Sub

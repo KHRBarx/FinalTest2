@@ -1,0 +1,57 @@
+Option Compare Database
+Option Explicit
+
+Public Sub Export_All_ToObjectDetails()
+    Const ROOT As String = "C:\Repos\ACCDB_KB180226\"
+
+    EnsureFolder ROOT
+    EnsureFolder ROOT & "\Forms"
+    EnsureFolder ROOT & "\Reports"
+    EnsureFolder ROOT & "\Modules"
+    EnsureFolder ROOT & "\Queries"
+
+    ExportAllForms ROOT & "\Forms"
+    ExportAllReports ROOT & "\Reports"
+    ExportAllModules ROOT & "\Modules"
+    ExportAllQueries ROOT & "\Queries"
+
+    MsgBox "Export complete to: " & ROOT, vbInformation
+End Sub
+
+Private Sub ExportAllForms(ByVal folderPath As String)
+    Dim ao As AccessObject
+    For Each ao In CurrentProject.AllForms
+        Application.SaveAsText acForm, ao.Name, folderPath & "\" & ao.Name & ".txt"
+    Next
+End Sub
+
+Private Sub ExportAllReports(ByVal folderPath As String)
+    Dim ao As AccessObject
+    For Each ao In CurrentProject.AllReports
+        Application.SaveAsText acReport, ao.Name, folderPath & "\" & ao.Name & ".txt"
+    Next
+End Sub
+
+Private Sub ExportAllModules(ByVal folderPath As String)
+    Dim ao As AccessObject
+    For Each ao In CurrentProject.AllModules
+        ' Includes standard + class modules in AllModules; class modules will still export fine as text.
+        Application.SaveAsText acModule, ao.Name, folderPath & "\" & ao.Name & ".txt"
+    Next
+End Sub
+
+Private Sub ExportAllQueries(ByVal folderPath As String)
+    Dim qd As DAO.QueryDef
+    For Each qd In CurrentDb.QueryDefs
+        ' Skip system/temp queries
+        If Left$(qd.Name, 4) <> "~sq_" And Left$(qd.Name, 4) <> "MSys" Then
+            Application.SaveAsText acQuery, qd.Name, folderPath & "\" & qd.Name & ".txt"
+        End If
+    Next
+End Sub
+
+Private Sub EnsureFolder(ByVal path As String)
+    If Len(Dir$(path, vbDirectory)) = 0 Then
+        MkDir path
+    End If
+End Sub

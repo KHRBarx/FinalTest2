@@ -1,0 +1,117 @@
+Option Compare Database
+Option Explicit
+Public Sub RunStartupCode()
+
+DoCmd.NavigateTo "acNavigationCategoryObjectType"
+DoCmd.RunCommand acCmdWindowHide
+DoCmd.ShowToolbar "Ribbon", acToolbarNo
+
+
+'#### Retrieve the Windows username.
+'#### Running the security checks this way allow me not have to introduce a secondary login screen.
+'#### Security is based off the interfacing hardware, which should always be locked when the user isn't present.
+
+'If Dir("\\SERVER\Share\MyApp\Backend\MyApp_BE.accdb") <> "" Then
+'    Call RelinkTables("\\SERVER\Share\MyApp\Backend\MyApp_BE.accdb")
+'End If
+
+
+Dim strUserName As String
+
+strUserName = Trim(Environ("USERNAME"))
+TempVars("USER") = strUserName ' TEMPVARS are Temporary variables, which are stored in memory whilst the session is running.
+Debug.Print "srtUserName set - " & TempVars!USER
+'Status "Tempvars!USER = " & TempVars!USER
+
+SetStartupTempVars
+
+'Set the ignore field tags for the Audit Trail (orevent duplicates in the report)
+Audit_SetIgnoreFields "IsDirty|IsNew|IsDeleted"
+
+'#### Get the corresponding info, for quotes, etc
+
+Dim telValue As Variant
+Dim emailValue As Variant
+Dim jobValue As Variant
+Dim SecPass As Variant
+Dim UserID As Variant
+'Dim WAFLocation As Variant
+Dim QuoteLocation As Variant
+Dim TnCPath As Variant
+Dim TnCs As Variant
+Dim TnCDocument As Variant
+Dim CreditAppDocument As Variant
+Dim CompanyInfoDocument As Variant
+
+
+'USER ID
+'Dim userID As String
+UserID = DLookup("ID", "t_ARTCStaff", "FullName = '" & TempVars("USER") & "'")
+If Not IsNull(UserID) Then
+    TempVars("USERID") = UserID
+Else
+    TempVars("USERID") = ""
+End If
+
+Status "UserID = " & TempVars!UserID
+
+Sec_InitSecuritySession CLng(Nz(TempVars!UserID, 0))
+
+'phone number
+'Dim telValue As String
+telValue = DLookup("Tel", "t_ARTCStaff", "FullName = '" & TempVars("USER") & "'")
+If Not IsNull(telValue) Then
+    TempVars("USERtel") = telValue
+Else
+    TempVars("USERtel") = ""
+End If
+
+'email address
+'Dim emailValue As String
+emailValue = DLookup("Email", "t_ARTCStaff", "FullName = '" & TempVars("USER") & "'")
+If Not IsNull(emailValue) Then
+    TempVars("USERemail") = emailValue
+Else
+    TempVars("USERemail") = ""
+End If
+
+'job title
+'Dim jobValue As String
+jobValue = DLookup("JobTitle", "t_ARTCStaff", "FullName = '" & TempVars("USER") & "'")
+If Not IsNull(jobValue) Then
+    TempVars("USERjob") = jobValue
+Else
+    TempVars("USERjob") = ""
+End If
+
+'Authorisation Level
+'Dim SecPass As String
+SecPass = DLookup("SecurityPass", "t_ARTCStaff", "FullName = '" & TempVars("USER") & "'")
+If Not IsNull(SecPass) Then
+    TempVars("SecPass") = SecPass
+Else
+    TempVars("SecPass") = ""
+End If
+
+'WAFLocation = "C:\Users\" & TempVars!USER & ".CAEVENWOOD\CA Group Ltd\ARTC Quality Management System - Documents\RTC-02_Commercial and Contract Review\Works Application Forms\"
+'TempVars!WAFLocation = WAFLocation
+
+TnCDocument = DLookup("DocPath", "t_AttachedDocuments", "DocName='Testing Services Terms and Conditions.pdf'")
+TempVars!TnCDocument = TnCDocument
+TempVars!TnCName = DLookup("DocFileName", "t_AttachedDocuments", "DocName='Testing Services Terms and Conditions.pdf'")
+
+CreditAppDocument = DLookup("DocPath", "t_AttachedDocuments", "DocName='ARTC Credit Application.pdf'")
+TempVars!CreditAppDocument = CreditAppDocument
+
+CompanyInfoDocument = DLookup("DocPath", "t_AttachedDocuments", "DocName='ARTC Company Info.pdf'")
+TempVars!CompanyInfoDocument = CompanyInfoDocument
+
+'Quote template
+QuoteLocation = Nz(DLookup("Location", "x_DocLocations", "Type = " & "'QUOTE'"), "")
+If Not IsNull(QuoteLocation) Then
+    TempVars("QuoteLocation") = QuoteLocation
+Else
+    TempVars("QuoteLocation") = ""
+End If
+
+End Sub

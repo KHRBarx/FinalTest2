@@ -1,0 +1,119 @@
+Option Compare Database
+Option Explicit
+
+' Lists Tables, Queries, Forms, and Reports in the current DB.
+' - includeHidden:=True to include system/hidden items where possible.
+' - outputToFile:="" to print to Immediate Window; set a file path to write to a text file.
+'
+' Examples:
+'   Call ListDbObjects                         ' Immediate Window
+'   Call ListDbObjects(True)                   ' Include hidden/system (where applicable)
+'   Call ListDbObjects(False, "C:\Temp\objects.txt")
+
+Public Sub ListDbObjects(Optional ByVal includeHidden As Boolean = False, _
+                         Optional ByVal outputToFile As String = "")
+    Dim db As DAO.Database
+    Dim td As DAO.TableDef
+    Dim qd As DAO.QueryDef
+    Dim ao As AccessObject
+    Dim fnum As Integer
+    Dim useFile As Boolean
+    
+    Set db = CurrentDb
+    
+    ' Set up output
+    useFile = (Len(outputToFile) > 0)
+    If useFile Then
+        fnum = FreeFile
+        Open outputToFile For Output As #fnum
+    End If
+    
+    Dim SubHdr As String
+    SubHdr = String(60, "-")
+    
+    ' Helper to write a line
+    Dim s As String
+    Dim procName As String: procName = "ListDbObjects"
+    
+    ' Header
+    s = "Database object listing for: " & CurrentProject.Name & "  (" & Format(Now, "yyyy-mm-dd hh:nn:ss") & ")"
+    WriteLine s, useFile, fnum
+    WriteLine SubHdr, useFile, fnum
+    
+    ' === TABLES ===
+    WriteLine "TABLES:", useFile, fnum
+    For Each td In db.TableDefs
+        If includeHidden Or IsVisibleTable(td) Then
+            WriteLine "  " & td.Name, useFile, fnum
+        End If
+    Next td
+    WriteLine "", useFile, fnum
+    
+'    ' === QUERIES ===
+'    WriteLine "QUERIES:", useFile, fnum
+'    For Each qd In db.QueryDefs
+'        If includeHidden Or IsVisibleQuery(qd) Then
+'            WriteLine "  " & qd.name, useFile, fnum
+'        End If
+'    Next qd
+'    WriteLine "", useFile, fnum
+'
+'    ' === FORMS ===
+'    ' Note: AccessObject collections (AllForms/AllReports) don’t expose a reliable “Hidden” flag.
+'    ' We list all design-time objects here.
+'    WriteLine "FORMS:", useFile, fnum
+'    For Each ao In CurrentProject.AllForms
+'        WriteLine "  " & ao.name, useFile, fnum
+'    Next ao
+'    WriteLine "", useFile, fnum
+'
+'    ' === REPORTS ===
+'    WriteLine "REPORTS:", useFile, fnum
+'    For Each ao In CurrentProject.AllReports
+'        WriteLine "  " & ao.name, useFile, fnum
+'    Next ao
+'    WriteLine "", useFile, fnum
+'
+'    WriteLine SubHdr, useFile, fnum
+'    WriteLine "Done.", useFile, fnum
+    
+CleanExit:
+    If useFile Then Close #fnum
+    Set db = Nothing
+    Exit Sub
+
+ErrHandler:
+    WriteLine "Error " & Err.Number & ": " & Err.Description, useFile, fnum
+    Resume CleanExit
+End Sub
+
+'--- Helpers ---
+
+Private Function IsVisibleTable(td As DAO.TableDef) As Boolean
+    ' Exclude system and hidden tables unless includeHidden=True
+    ' Visible when neither dbSystemObject nor dbHiddenObject is set.
+    On Error Resume Next
+    IsVisibleTable = ((td.Attributes And dbSystemObject) = 0) And ((td.Attributes And dbHiddenObject) = 0)
+End Function
+
+Private Function IsVisibleQuery(qd As DAO.QueryDef) As Boolean
+    ' Filter out temporary/system queries commonly prefixed "~" or "MSys"
+    ' There is no Attributes flag here like TableDefs, so use naming heuristics.
+    Dim n As String
+    n = qd.Name
+    If Left$(n, 1) = "~" Then
+        IsVisibleQuery = False
+    ElseIf Left$(n, 4) = "MSys" Then
+        IsVisibleQuery = False
+    Else
+        IsVisibleQuery = True
+    End If
+End Function
+
+Private Sub WriteLine(ByVal text As String, ByVal useFile As Boolean, ByVal fnum As Integer)
+    If useFile Then
+        Print #fnum, text
+    Else
+        'Debug.Print text
+    End If
+End Sub

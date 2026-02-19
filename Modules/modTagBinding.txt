@@ -1,0 +1,125 @@
+Option Compare Database
+Option Explicit
+
+' Tag format on bound controls (textboxes/combos/checks):
+'   tbl=t_Contacts;pk=ContactID;fk=ClientID;fld=Forename
+' or:
+'   tbl=t_Addresses;pk=AddressID;fk=ClientID;fld=Address1Line1
+
+Private Function TagGet(ctrl As Control, key As String, Optional def As String = "") As String
+    Dim parts() As String, i As Long, kv() As String
+    If Len(ctrl.Tag & vbNullString) = 0 Then TagGet = def: Exit Function
+    parts = Split(ctrl.Tag, ";")
+    For i = LBound(parts) To UBound(parts)
+        kv = Split(parts(i), "=")
+        If UBound(kv) = 1 Then
+            If Trim$(LCase$(kv(0))) = LCase$(key) Then
+                TagGet = Trim$(kv(1))
+                Exit Function
+            End If
+        End If
+    Next
+    TagGet = def
+End Function
+
+Private Function SqlValue(v As Variant) As String
+    If IsNull(v) Then
+        SqlValue = "Null"
+    ElseIf VarType(v) = vbBoolean Then
+        SqlValue = IIf(v, "-1", "0")
+    ElseIf IsDate(v) Then
+        SqlValue = "#" & Format$(CDate(v), "yyyy-mm-dd hh:nn:ss") & "#"
+    ElseIf IsNumeric(v) And Not IsEmpty(v) And Len(v & "") > 0 Then
+        SqlValue = CStr(v)
+    Else
+        SqlValue = "'" & Replace(CStr(v), "'", "''") & "'"
+    End If
+End Function
+
+Private Function FirstTagged(frm As Form) As Control
+    Dim c As Control
+    For Each c In frm.Controls
+        If InStr(1, c.Tag & "", "tbl=", vbTextCompare) > 0 And _
+           InStr(1, c.Tag & "", "fld=", vbTextCompare) > 0 Then
+            Set FirstTagged = c
+            Exit Function
+        End If
+    Next
+End Function
+
+Public Sub TagLoadRow(frm As Form, ByVal pkValue As Variant, Optional ByVal ClientID As Variant)
+    Dim c As Control, c0 As Control
+    Dim tbl As String, pk As String, fk As String
+    Dim rs As DAO.Recordset, sql As String
+
+    Set c0 = FirstTagged(frm)
+    If c0 Is Nothing Then Exit Sub
+
+    tbl = TagGet(c0, "tbl")
+    pk = TagGet(c0, "pk")
+    fk = TagGet(c0, "fk")
+
+    If IsMissing(ClientID) Or IsEmpty(ClientID) Then ClientID = Nz(TempVars!ClientID, 0)
+
+    sql = "SELECT * FROM " & tbl & " WHERE " & pk & "=" & pkValue
+    If Len(fk) > 0 Then sql = sql & " AND " & fk & "=" & CLng(ClientID)
+
+    Set rs = CurrentDb.OpenRecordset(sql, dbOpenSnapshot)
+
+    If rs.EOF Then
+        ' clear controls if nothing to load
+        For Each c In frm.Controls
+            If InStr(1, c.Tag & "", "fld=", vbTextCompare) > 0 Then
+                On Error Resume Next
+                c.value = Null
+                On Error GoTo 0
+            End If
+        Next
+    Else
+        For Each c In frm.Controls
+            If InStr(1, c.Tag & "", "fld=", vbTextCompare) > 0 Then
+                On Error Resume Next
+                c.value = rs(TagGet(c, "fld"))
+                On Error GoTo 0
+            End If
+        Next
+    End If
+
+    rs.Close
+    Set rs = Nothing
+End Sub
+
+Public Function TagSaveRow(frm As Form, ByVal pkValue As Variant, Optional ByVal ClientID As Variant) As Long
+    Dim c As Control, c0 As Control
+    Dim tbl As String, pk As String, fk As String
+    Dim sets As String, sql As String
+    Dim firstSet As Boolean
+
+    Set c0 = FirstTagged(frm)
+    If c0 Is Nothing Then Exit Function
+
+    tbl = TagGet(c0, "tbl")
+    pk = TagGet(c0, "pk")
+    fk = TagGet(c0, "fk")
+    If IsMissing(ClientID) Or IsEmpty(ClientID) Then ClientID = Nz(TempVars!ClientID, 0)
+
+    firstSet = True
+    For Each c In frm.Controls
+        If InStr(1, c.Tag & "", "fld=", vbTextCompare) > 0 Then
+            Dim fld As String
+            fld = TagGet(c, "fld")
+            If firstSet Then
+                sets = "[" & fld & "]=" & SqlValue(Nz(c.value, Null))
+                firstSet = False
+            Else
+                sets = sets & ", [" & fld & "]=" & SqlValue(Nz(c.value, Null))
+            End If
+        End If
+    Next
+
+    sql = "UPDATE " & tbl & " SET " & sets & " WHERE " & pk & "=" & pkValue
+    If Len(fk) > 0 Then sql = sql & " AND " & fk & "=" & CLng(ClientID)
+
+    CurrentDb.Execute sql, dbFailOnError
+    TagSaveRow = CurrentDb.RecordsAffected
+End Function

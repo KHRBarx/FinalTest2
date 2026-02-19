@@ -1,0 +1,18 @@
+Option Compare Database
+Option Explicit
+
+'Public Sub UpdateNavOrdersEnabledState()
+'
+'    Dim active As String
+'
+'    active = Nz(DLookup("OrderID", "t_Orders", "QuoteID = " & Nz(TempVars("QuoteID"), 0)), "")
+'
+'    On Error GoTo 0
+'
+'    If active = "" Then
+'        Forms!MAIN_FORM!NavOrders.Enabled = False
+'    Else
+'        Forms!MAIN_FORM!NavOrders.Enabled = True
+'    End If
+'
+'End Sub

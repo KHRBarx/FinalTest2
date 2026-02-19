@@ -1,0 +1,146 @@
+Option Compare Database
+Option Explicit
+
+'=============================
+' Public API
+'=============================
+Public Function CommitStampedNote( _
+    ByVal frm As Access.Form, _
+    ByVal NotesControlName As String, _
+    ByVal EntryControlName As String, _
+    ByVal SuffixChar As String, _
+    Optional ByVal UserTempVarName As String = "User", _
+    Optional ByVal SeparatorHashCount As Long = 22, _
+    Optional ByVal ClearEntryAfter As Boolean = True, _
+    Optional ByVal AttemptSaveRecord As Boolean = True, _
+    Optional ByVal ShowMessages As Boolean = True _
+) As Boolean
+
+    On Error GoTo ErrHandler
+
+    Dim entryText As String
+    Dim existingNotes As String
+    Dim stampUser As String
+    Dim stampDT As String
+    Dim stampLine As String
+    Dim separatorLine As String
+    Dim newNotes As String
+
+    '----- Validate controls exist -----
+    If Not ControlExists(frm, NotesControlName) Then
+        MsgBox "Notes control not found: " & NotesControlName, vbExclamation, "Commit Note"
+        Exit Function
+    End If
+
+    If Not ControlExists(frm, EntryControlName) Then
+        MsgBox "Entry control not found: " & EntryControlName, vbExclamation, "Commit Note"
+        Exit Function
+    End If
+
+    '----- Get entry text -----
+    entryText = Trim$(Nz(frm.Controls(EntryControlName).value, vbNullString))
+'    If Len(entryText) = 0 Then
+'        MsgBox "Nothing to commit. Please type a note first.", vbInformation, "Commit Note"
+'        Exit Function
+'    End If
+
+    '----- Build stamp -----
+    stampUser = GetTempVarText(UserTempVarName)
+    If Len(stampUser) = 0 Then stampUser = "UnknownUser"
+
+    stampDT = Format$(Now, "dd-mmm-yy @ hh:nn")
+    stampLine = stampUser & " - " & stampDT & " " & vbNewLine & entryText
+
+    '----- Build separator (e.g. ######################E) -----
+    If Len(Trim$(SuffixChar)) = 0 Then SuffixChar = "?"
+    separatorLine = String$(SeparatorHashCount, "-") & Left$(Trim$(SuffixChar), 1)
+
+    '----- Merge into notes (NEWEST FIRST) -----
+    existingNotes = Nz(frm.Controls(NotesControlName).value, vbNullString)
+    
+    Dim stampedBlock As String
+    stampedBlock = stampLine & vbNewLine & separatorLine & vbNewLine
+    
+    If Len(existingNotes) = 0 Then
+        newNotes = stampedBlock
+    Else
+        ' Trim leading line breaks from existing text to avoid extra blank gap
+        Do While Left$(existingNotes, 2) = vbCrLf
+            existingNotes = Mid$(existingNotes, 3)
+        Loop
+        Do While Left$(existingNotes, 1) = vbLf
+            existingNotes = Mid$(existingNotes, 2)
+        Loop
+    
+        ' Prepend latest entry at top
+        newNotes = stampedBlock & existingNotes
+    End If
+
+    frm.Controls(NotesControlName).value = newNotes
+
+    '----- Clear entry box -----
+    If ClearEntryAfter Then
+        frm.Controls(EntryControlName).value = Null
+    End If
+
+    '----- Try to save (safe on bound forms; harmless on unbound) -----
+    If AttemptSaveRecord Then
+        TrySaveRecord frm
+    End If
+
+    CommitStampedNote = True
+    Exit Function
+
+ErrHandler:
+    MsgBox "CommitStampedNote failed: " & Err.Description, vbExclamation, "Commit Note"
+End Function
+
+'=============================
+' Helpers
+'=============================
+Private Function ControlExists(ByVal frm As Access.Form, ByVal ControlName As String) As Boolean
+    On Error GoTo Nope
+    Dim tmp As Access.Control
+    Set tmp = frm.Controls(ControlName)
+    ControlExists = True
+    Exit Function
+Nope:
+    ControlExists = False
+End Function
+
+Private Function GetTempVarText(ByVal TempVarName As String) As String
+    On Error GoTo Missing
+    GetTempVarText = Trim$(Nz(TempVars(TempVarName).value, vbNullString))
+    Exit Function
+Missing:
+    GetTempVarText = vbNullString
+End Function
+
+Private Sub TrySaveRecord(ByVal frm As Access.Form)
+    On Error GoTo CleanFail
+
+    'Bound forms typically use Dirty + SaveRecord
+    If frm.Dirty Then
+        DoCmd.RunCommand acCmdSaveRecord
+    End If
+
+CleanFail:
+    'Intentionally swallow errors (common on unbound forms)
+End Sub
+
+Private Function MergeNoteNewestFirst(ByVal existingText As String, ByVal stampedEntry As String) As String
+    Dim oldTxt As String
+    Dim newTxt As String
+
+    oldTxt = Trim$(Nz(existingText, ""))
+    newTxt = Trim$(Nz(stampedEntry, ""))
+
+    If Len(newTxt) = 0 Then
+        MergeNoteNewestFirst = oldTxt
+    ElseIf Len(oldTxt) = 0 Then
+        MergeNoteNewestFirst = newTxt
+    Else
+        ' Newest at top, keep one blank line separator between entries
+        MergeNoteNewestFirst = newTxt & vbCrLf & vbCrLf & oldTxt
+    End If
+End Function

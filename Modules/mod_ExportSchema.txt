@@ -1,0 +1,215 @@
+Option Compare Database
+Option Explicit
+
+' === ENTRY POINT ===
+Public Sub Export_TableSchema_ToCSV()
+    ' Set this to your repo schema folder
+    ' Example: C:\Repos\access-app-source-test\access_src\Schema
+    Dim outFolder As String
+    outFolder = "C:\Repos\access-app-source-test\access_src\Schema_FrontEnd"  ' <-- CHANGE THIS
+
+    EnsureFolderRecursive outFolder
+
+    ExportTableFieldsCSV outFolder & "\TABLES_SCHEMA.csv"
+    ExportIndexesCSV outFolder & "\INDEXES.csv"
+    ExportRelationshipsCSV outFolder & "\RELATIONSHIPS.csv"
+
+    MsgBox "Schema export complete:" & vbCrLf & outFolder, vbInformation
+End Sub
+
+Private Sub ExportTableFieldsCSV(ByVal filePath As String)
+    Dim db As DAO.Database
+    Dim tdf As DAO.TableDef
+    Dim fld As DAO.Field
+    Dim f As Integer
+
+    Set db = CurrentDb
+    f = FreeFile
+
+    Open filePath For Output As #f
+    Print #f, "TableName,IsLinked,FieldName,DataType,Size,Required,AllowZeroLength,DefaultValue,Format,ValidationRule,ValidationText,Description," & _
+              "Lookup_DisplayControl,Lookup_RowSourceType,Lookup_RowSource,Lookup_BoundColumn,Lookup_ColumnCount,Lookup_ColumnWidths,Lookup_LimitToList"
+
+    For Each tdf In db.TableDefs
+        If IncludeTable(tdf.Name) Then
+            For Each fld In tdf.fields
+                Print #f, Csv(tdf.Name) & "," & _
+                          Csv(IsLinkedTable(tdf)) & "," & _
+                          Csv(fld.Name) & "," & _
+                          Csv(FieldTypeName(fld.Type)) & "," & _
+                          Csv(Nz(fld.Size, "")) & "," & _
+                          Csv(PropBool(fld, "Required")) & "," & _
+                          Csv(PropBool(fld, "AllowZeroLength")) & "," & _
+                          Csv(PropText(fld, "DefaultValue")) & "," & _
+                          Csv(PropText(fld, "Format")) & "," & _
+                          Csv(PropText(fld, "ValidationRule")) & "," & _
+                          Csv(PropText(fld, "ValidationText")) & "," & _
+                          Csv(PropText(fld, "Description")) & "," & _
+                          Csv(PropText(fld, "DisplayControl")) & "," & _
+                          Csv(PropText(fld, "RowSourceType")) & "," & _
+                          Csv(PropText(fld, "RowSource")) & "," & _
+                          Csv(PropText(fld, "BoundColumn")) & "," & _
+                          Csv(PropText(fld, "ColumnCount")) & "," & _
+                          Csv(PropText(fld, "ColumnWidths")) & "," & _
+                          Csv(PropText(fld, "LimitToList"))
+            Next fld
+        End If
+    Next tdf
+
+    Close #f
+End Sub
+
+Private Sub ExportIndexesCSV(ByVal filePath As String)
+    Dim db As DAO.Database
+    Dim tdf As DAO.TableDef
+    Dim idx As DAO.Index
+    Dim ifld As DAO.Field
+    Dim f As Integer
+    Dim fieldList As String
+
+    Set db = CurrentDb
+    f = FreeFile
+
+    Open filePath For Output As #f
+    Print #f, "TableName,IndexName,Primary,Unique,Required,IgnoreNulls,Fields"
+
+    For Each tdf In db.TableDefs
+        If IncludeTable(tdf.Name) Then
+            For Each idx In tdf.Indexes
+                fieldList = ""
+                For Each ifld In idx.fields
+                    fieldList = fieldList & IIf(Len(fieldList) > 0, ";", "") & ifld.Name
+                Next ifld
+
+                Print #f, Csv(tdf.Name) & "," & _
+                          Csv(idx.Name) & "," & _
+                          Csv(idx.Primary) & "," & _
+                          Csv(idx.Unique) & "," & _
+                          Csv(idx.Required) & "," & _
+                          Csv(idx.IgnoreNulls) & "," & _
+                          Csv(fieldList)
+            Next idx
+        End If
+    Next tdf
+
+    Close #f
+End Sub
+
+Private Sub ExportRelationshipsCSV(ByVal filePath As String)
+    Dim db As DAO.Database
+    Dim rel As DAO.Relation
+    Dim rf As DAO.Field
+    Dim f As Integer
+
+    Set db = CurrentDb
+    f = FreeFile
+
+    Open filePath For Output As #f
+    Print #f, "RelationName,Table,ForeignTable,Attributes,LocalField,ForeignField"
+
+    For Each rel In db.Relations
+        If Left$(rel.Name, 4) <> "MSys" Then
+            If rel.fields.Count = 0 Then
+                Print #f, Csv(rel.Name) & "," & Csv(rel.Table) & "," & Csv(rel.ForeignTable) & "," & Csv(rel.Attributes) & ",,"  ' no fields listed
+            Else
+                For Each rf In rel.fields
+                    Print #f, Csv(rel.Name) & "," & _
+                              Csv(rel.Table) & "," & _
+                              Csv(rel.ForeignTable) & "," & _
+                              Csv(rel.Attributes) & "," & _
+                              Csv(rf.Name) & "," & _
+                              Csv(rf.ForeignName)
+                Next rf
+            End If
+        End If
+    Next rel
+
+    Close #f
+End Sub
+
+' ---------- Helpers ----------
+
+Private Function IncludeTable(ByVal tableName As String) As Boolean
+    If Left$(tableName, 4) = "MSys" Then
+        IncludeTable = False
+    Else
+        IncludeTable = True
+    End If
+End Function
+
+Private Function IsLinkedTable(ByVal tdf As DAO.TableDef) As Boolean
+    On Error Resume Next
+    IsLinkedTable = (Len(tdf.connect & vbNullString) > 0)
+    On Error GoTo 0
+End Function
+
+Private Function FieldTypeName(ByVal daoType As Integer) As String
+    Select Case daoType
+        Case dbBoolean: FieldTypeName = "Yes/No"
+        Case dbByte: FieldTypeName = "Byte"
+        Case dbInteger: FieldTypeName = "Integer"
+        Case dbLong: FieldTypeName = "Long"
+        Case dbSingle: FieldTypeName = "Single"
+        Case dbDouble: FieldTypeName = "Double"
+        Case dbCurrency: FieldTypeName = "Currency"
+        Case dbDate: FieldTypeName = "Date/Time"
+        Case dbText: FieldTypeName = "Short Text"
+        Case dbMemo: FieldTypeName = "Long Text"
+        Case dbGUID: FieldTypeName = "GUID"
+        Case dbDecimal: FieldTypeName = "Decimal"
+        Case dbBigInt: FieldTypeName = "BigInt"
+        Case Else: FieldTypeName = "Type_" & CStr(daoType)
+    End Select
+End Function
+
+Private Function PropText(ByVal obj As Object, ByVal propName As String) As String
+    On Error Resume Next
+    PropText = Nz(obj.Properties(propName).value, "")
+    On Error GoTo 0
+End Function
+
+Private Function PropBool(ByVal obj As Object, ByVal propName As String) As String
+    Dim v As Variant
+    On Error Resume Next
+    v = obj.Properties(propName).value
+    If Err.Number <> 0 Then
+        Err.Clear
+        PropBool = ""
+    Else
+        PropBool = IIf(CBool(v), "TRUE", "FALSE")
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function Csv(ByVal v As Variant) As String
+    Dim s As String
+    s = Nz(v, "")
+    s = Replace(s, """", """""")
+    Csv = """" & s & """"
+End Function
+
+Private Sub EnsureFolderRecursive(ByVal folderPath As String)
+    Dim parts() As String
+    Dim build As String
+    Dim i As Long
+
+    folderPath = Replace(folderPath, "/", "\")
+    If Right$(folderPath, 1) = "\" Then folderPath = Left$(folderPath, Len(folderPath) - 1)
+    If Len(folderPath) = 0 Then Exit Sub
+
+    parts = Split(folderPath, "\")
+
+    If Left$(folderPath, 2) = "\\" Then
+        build = "\\" & parts(2) & "\" & parts(3)
+        For i = 4 To UBound(parts)
+            build = build & "\" & parts(i)
+            If Len(Dir(build, vbDirectory)) = 0 Then MkDir build
+        Next i
+    Else
+        build = parts(0)
+        For i = 1 To UBound(parts)
+            build = build & "\" & parts(i)
+            If Len(Dir(build, vbDirectory)) = 0 Then MkDir build
+        Next i
+    End If
+End Sub

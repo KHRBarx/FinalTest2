@@ -1,0 +1,207 @@
+Option Compare Database
+Option Explicit
+
+'=========================================================
+' modEmail_Invoices
+' Creates Outlook draft email from t_EmailTemplate row with
+' PDF attached.
+'
+' Call:
+'   SendInvoiceEmailFromTemplate "Supplementary_Invoice", InvoiceID, pdfPath
+'=========================================================
+
+Public Sub SendInvoiceEmailFromTemplate( _
+    ByVal TemplateName As String, _
+    ByVal InvoiceID As Long, _
+    ByVal pdfPath As String)
+
+    On Error GoTo ErrHandler
+
+    If Len(Dir$(pdfPath)) = 0 Then
+        MsgBox "The PDF could not be found at:" & vbCrLf & pdfPath, vbExclamation, "Email not created"
+        Exit Sub
+    End If
+
+    '------------------------------------------------------
+    ' Read email template row (t_EmailTemplate ONLY)
+    '------------------------------------------------------
+    Dim dbT As DAO.Database
+    Dim rsT As DAO.Recordset
+
+    Dim tmplTo As String, tmplCc As String, tmplBcc As String
+    Dim tmplSubj As String, tmplBody As String
+
+    Set dbT = CurrentDb()
+
+    Set rsT = dbT.OpenRecordset( _
+        "SELECT * FROM t_EmailTemplate WHERE TemplateName=" & QuoteSQL(TemplateName), _
+        dbOpenSnapshot)
+
+    If rsT Is Nothing Or rsT.EOF Then
+        MsgBox "Email template not found in t_EmailTemplate: " & TemplateName, vbExclamation, "Email not created"
+        GoTo CleanExit
+    End If
+
+    tmplTo = Nz(rsT!ToTemplate, "")
+    tmplCc = Nz(rsT!CCTemplate, "")
+    tmplBcc = Nz(rsT!BCCTemplate, "")
+    tmplSubj = Nz(rsT!SubjectTemplate, "")
+    tmplBody = Nz(rsT!BodyTemplate, "")
+
+    rsT.Close
+    Set rsT = Nothing
+
+    '------------------------------------------------------
+    ' Look up data for placeholders
+    '------------------------------------------------------
+    Dim qid As Long, ClientID As Long, ContactID As Long
+    Dim InvoiceREF As String, quoteNum As String, purchaseRef As String
+    Dim ContactEmail As String, contactName As String, ClientName As String
+    Dim AccountsEmail As String
+    Dim invVal As String
+    Dim invoiceGross As Currency
+
+    InvoiceREF = Nz(DLookup("InvoiceREF", "t_Invoices", "InvoiceID=" & InvoiceID), "")
+    qid = Nz(DLookup("QuoteID", "t_Invoices", "InvoiceID=" & InvoiceID), 0)
+
+    If qid <> 0 Then
+        quoteNum = Nz(DLookup("QuoteNumber", "t_Quotations", "QuoteID=" & qid), "")
+        purchaseRef = Nz(DLookup("PurchaseOrderRef", "t_Orders", "QuoteID=" & qid), "")
+
+        ClientID = Nz(DLookup("ClientID", "t_Quotations", "QuoteID=" & qid), 0)
+
+        ContactID = Nz(DLookup("ContactID", "t_Orders", "QuoteID=" & qid), 0)
+        If ContactID = 0 Then
+            ContactID = Nz(DLookup("ContactID", "t_Quotations", "QuoteID=" & qid), 0)
+        End If
+    Else
+        quoteNum = ""
+        purchaseRef = ""
+        ClientID = Nz(DLookup("ClientID", "t_Invoices", "InvoiceID=" & InvoiceID), 0)
+        ContactID = 0
+    End If
+
+    If ClientID <> 0 Then
+        ClientName = Nz(DLookup("Client", "t_Clients", "ClientID=" & ClientID), "")
+        If Len(ClientName) = 0 Then
+            ClientName = Nz(DLookup("KnownAs", "t_Clients", "ClientID=" & ClientID), "")
+        End If
+        AccountsEmail = Nz(DLookup("HeadOfficeEmail", "t_Clients", "ClientID=" & ClientID), "")
+    Else
+        ClientName = ""
+        AccountsEmail = ""
+    End If
+
+    If ContactID <> 0 Then
+        ContactEmail = Nz(DLookup("EmailAddress", "t_Contacts", "ContactID=" & ContactID), "")
+        contactName = Nz(DLookup("ConcatName", "t_Contacts", "ContactID=" & ContactID), "")
+    Else
+        ContactEmail = ""
+        contactName = ""
+    End If
+
+    ' Invoice Value (prefer InvoiceIncVAT)
+    invoiceGross = CCur(Nz(DLookup("InvoiceIncVAT", "t_Invoices", "InvoiceID=" & InvoiceID), 0))
+    If invoiceGross <> 0 Then
+        invVal = Format$(invoiceGross, "£#,##0.00")
+    Else
+        ' fallback: InvoiceValue
+        invVal = Format$(CCur(Nz(DLookup("InvoiceValue", "t_Invoices", "InvoiceID=" & InvoiceID), 0)), "£#,##0.00")
+    End If
+
+    '------------------------------------------------------
+    ' Replace placeholders in To / CC / BCC / Subject / Body
+    '------------------------------------------------------
+    Dim toAddr As String, ccAddr As String, bccAddr As String
+    Dim subj As String, bodyHtml As String
+
+    toAddr = tmplTo
+    ccAddr = tmplCc
+    bccAddr = tmplBcc
+    subj = tmplSubj
+    bodyHtml = tmplBody
+
+    ' To/CC/BCC replacements
+    toAddr = Replace(toAddr, "[ContactEmail]", ContactEmail)
+    toAddr = Replace(toAddr, "[ContactName]", contactName)
+    toAddr = Replace(toAddr, "[ClientName]", ClientName)
+    toAddr = Replace(toAddr, "[AccountsEmail]", AccountsEmail)
+
+    ccAddr = Replace(ccAddr, "[ContactEmail]", ContactEmail)
+    ccAddr = Replace(ccAddr, "[ContactName]", contactName)
+    ccAddr = Replace(ccAddr, "[ClientName]", ClientName)
+    ccAddr = Replace(ccAddr, "[AccountsEmail]", AccountsEmail)
+
+    bccAddr = Replace(bccAddr, "[ContactEmail]", ContactEmail)
+    bccAddr = Replace(bccAddr, "[ContactName]", contactName)
+    bccAddr = Replace(bccAddr, "[ClientName]", ClientName)
+    bccAddr = Replace(bccAddr, "[AccountsEmail]", AccountsEmail)
+
+    ' Subject replacements
+    subj = Replace(subj, "[ContactEmail]", ContactEmail)
+    subj = Replace(subj, "[ContactName]", contactName)
+    subj = Replace(subj, "[ClientName]", ClientName)
+    subj = Replace(subj, "[AccountsEmail]", AccountsEmail)
+    subj = Replace(subj, "[InvoiceRef]", InvoiceREF)
+    subj = Replace(subj, "[InvoiceNumber]", CStr(InvoiceID))
+    subj = Replace(subj, "[QuoteNumber]", quoteNum)
+    subj = Replace(subj, "[PurchaseOrderRef]", purchaseRef)
+    subj = Replace(subj, "[InvoiceValue]", invVal)
+    subj = Replace(subj, "[DepositValue]", invVal)
+
+    ' Body replacements
+    bodyHtml = Replace(bodyHtml, "[ContactEmail]", ContactEmail)
+    bodyHtml = Replace(bodyHtml, "[ContactName]", contactName)
+    bodyHtml = Replace(bodyHtml, "[ClientName]", ClientName)
+    bodyHtml = Replace(bodyHtml, "[AccountsEmail]", AccountsEmail)
+    bodyHtml = Replace(bodyHtml, "[InvoiceRef]", InvoiceREF)
+    bodyHtml = Replace(bodyHtml, "[InvoiceNumber]", CStr(InvoiceID))
+    bodyHtml = Replace(bodyHtml, "[QuoteNumber]", quoteNum)
+    bodyHtml = Replace(bodyHtml, "[PurchaseOrderRef]", purchaseRef)
+    bodyHtml = Replace(bodyHtml, "[InvoiceValue]", invVal)
+    bodyHtml = Replace(bodyHtml, "[DepositValue]", invVal)
+
+    '------------------------------------------------------
+    ' Create Outlook draft + attach PDF
+    '------------------------------------------------------
+    Dim OutlookApp As Object
+    Dim OutlookMail As Object
+
+    On Error Resume Next
+    Set OutlookApp = GetObject(, "Outlook.Application")
+    If OutlookApp Is Nothing Then Set OutlookApp = CreateObject("Outlook.Application")
+    On Error GoTo ErrHandler
+
+    If OutlookApp Is Nothing Then
+        MsgBox "Outlook could not be started. Draft email was not created.", vbExclamation
+        GoTo CleanExit
+    End If
+
+    Set OutlookMail = OutlookApp.CreateItem(0)
+    With OutlookMail
+        .To = toAddr
+        .cc = ccAddr
+        .BCC = bccAddr
+        .Subject = subj
+        .htmlBody = bodyHtml
+        .Attachments.Add pdfPath
+        .Display
+    End With
+
+CleanExit:
+    On Error Resume Next
+    If Not rsT Is Nothing Then rsT.Close
+    Set rsT = Nothing
+    Set dbT = Nothing
+    Set OutlookMail = Nothing
+    Set OutlookApp = Nothing
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Invoice email draft failed: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume CleanExit
+End Sub
+
+Private Function QuoteSQL(ByVal s As String) As String
+    QuoteSQL = "'" & Replace(Nz(s, ""), "'", "''") & "'"
+End Function

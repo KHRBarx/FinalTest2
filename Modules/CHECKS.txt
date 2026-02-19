@@ -1,0 +1,162 @@
+Option Compare Database
+Option Explicit
+
+Sub ScanForNewModuleCommands()
+    Dim ao As AccessObject, tmp As String, s As String
+    tmp = Environ$("TEMP") & "\acc_scan_tmp.txt"
+    
+    Debug.Print "=== FORMS (embedded) with RunCommand->NewObjectModule ==="
+    For Each ao In CurrentProject.AllForms
+        Application.SaveAsText acForm, ao.Name, tmp
+        s = ReadAll(tmp)
+        FindNewModuleMarkers "Form", ao.Name, s
+    Next
+    
+    Debug.Print "=== REPORTS (embedded) with RunCommand->NewObjectModule ==="
+    For Each ao In CurrentProject.AllReports
+        Application.SaveAsText acReport, ao.Name, tmp
+        s = ReadAll(tmp)
+        FindNewModuleMarkers "Report", ao.Name, s
+    Next
+    
+    Debug.Print "=== STANDALONE MACROS with RunCommand->NewObjectModule ==="
+    For Each ao In CurrentProject.AllMacros
+        Application.SaveAsText acMacro, ao.Name, tmp
+        s = ReadAll(tmp)
+        FindNewModuleMarkers "Macro", ao.Name, s
+    Next
+    
+    On Error Resume Next
+    Kill tmp
+End Sub
+
+Private Sub FindNewModuleMarkers(kind As String, obj As String, ByVal xml As String)
+    ' looks for either explicit RunCommand or the command name appearing
+    If InStr(1, xml, "<Action Name=""RunCommand"">", vbTextCompare) > 0 And _
+       (InStr(1, xml, "<Argument Name=""Command"">NewObjectModule</Argument>", vbTextCompare) > 0 _
+     Or InStr(1, xml, "NewObjectModule", vbTextCompare) > 0) Then
+        Debug.Print kind & ":", obj, "has RunCommand -> NewObjectModule"
+    End If
+End Sub
+
+Private Function ReadAll(path As String) As String
+    Dim f As Integer: f = FreeFile
+    Dim s As String
+    Open path For Binary As #f
+    If LOF(f) > 0 Then
+        s = Space$(LOF(f))
+        Get #f, , s
+    End If
+    Close #f
+    ReadAll = s
+End Function
+
+Public Sub InvoiceTable_Diagnostics()
+    Dim db As DAO.Database
+    Dim tdf As DAO.TableDef
+    Dim src As String, conn As String, isLinked As Boolean
+    Dim beforeCnt As Long, afterCnt As Long
+    Dim TestID As Long
+    Dim rs As DAO.Recordset
+    Dim updatable As Boolean, errText As String
+
+    On Error GoTo EH
+    Set db = CurrentDb
+    Set tdf = db.TableDefs("t_Invoices")
+    isLinked = (Len(tdf.connect) > 0)
+    conn = tdf.connect
+    src = tdf.SourceTableName
+    If Len(src) = 0 Then src = "t_Invoices"
+
+    ' Can we open it dynaset and is it updatable?
+    Set rs = db.OpenRecordset("t_Invoices", dbOpenDynaset)
+    updatable = rs.updatable
+    rs.Close: Set rs = Nothing
+
+    beforeCnt = DCount("*", "t_Invoices")
+
+    ' Minimal header insert ONLY
+    db.Execute _
+        "INSERT INTO t_Invoices (QuoteID, PaymentDate, InvoiceNotes, InvoiceIncVAT) " & _
+        "VALUES (1, #" & Format$(Date, "yyyy-mm-dd") & "#, 'DIAG TEST', 0.01);", _
+        dbFailOnError
+
+    ' Get identity from THIS connection
+    Set rs = db.OpenRecordset("SELECT @@IDENTITY AS NewID;", dbOpenSnapshot)
+    If Not rs.EOF Then TestID = Nz(rs!newID, 0)
+    rs.Close: Set rs = Nothing
+
+    afterCnt = DCount("*", "t_Invoices")
+
+    MsgBox _
+        "t_Invoices diagnostics:" & vbCrLf & vbCrLf & _
+        "Linked table: " & IIf(isLinked, "Yes", "No") & vbCrLf & _
+        "Connect: " & IIf(isLinked, conn, "(local)") & vbCrLf & _
+        "Source name: " & src & vbCrLf & _
+        "Updatable: " & IIf(updatable, "Yes", "No") & vbCrLf & _
+        "Row count before: " & beforeCnt & vbCrLf & _
+        "Row count after:  " & afterCnt & vbCrLf & _
+        "Inserted ID (@@IDENTITY): " & TestID, vbInformation, "t_Invoices Check"
+
+    Exit Sub
+EH:
+    errText = "Diagnostics failed: " & Err.Number & " - " & Err.Description
+    MsgBox errText, vbCritical
+End Sub
+
+Public Sub Invoice_Insert_SmokeTest()
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim newID As Long
+    Dim sql As String
+    Dim found As Boolean
+
+    On Error GoTo EH
+    Set db = CurrentDb
+
+    sql = "INSERT INTO t_Invoices (QuoteID, PaymentDate, InvoiceNotes, InvoiceIncVAT) " & _
+          "VALUES (1, #" & Format$(Date, "yyyy-mm-dd") & "#, 'SMOKE', 0.01);"
+    db.Execute sql, dbFailOnError
+
+    Set rs = db.OpenRecordset("SELECT @@IDENTITY AS NewID;", dbOpenSnapshot)
+    If Not rs.EOF Then newID = Nz(rs!newID, 0)
+    rs.Close
+
+    ' Try to read back the row we (think we) just inserted:
+    Set rs = db.OpenRecordset("SELECT * FROM t_Invoices WHERE InvoiceID=" & newID, dbOpenSnapshot)
+    found = Not rs.EOF
+    rs.Close
+
+    MsgBox "Inserted ID: " & newID & vbCrLf & "Row exists right now? " & IIf(found, "YES", "NO")
+    Exit Sub
+EH:
+    MsgBox "Smoke test failed: " & Err.Number & " - " & Err.Description, vbCritical
+End Sub
+
+Public Sub Invoice_Disappears_Poller()
+    Dim db As DAO.Database, rs As DAO.Recordset
+    Dim ID As Long, i As Long, existsNow As Boolean
+    Dim startTime As Single
+
+    Set db = CurrentDb
+    db.Execute "INSERT INTO t_Invoices (QuoteID, InvoiceNotes, InvoiceIncVAT) " & _
+               "VALUES (1, 'POLL', 0.01);", dbFailOnError
+
+    Set rs = db.OpenRecordset("SELECT @@IDENTITY AS NewID;", dbOpenSnapshot)
+    If Not rs.EOF Then ID = Nz(rs!newID, 0)
+    rs.Close
+
+    Debug.Print "Inserted ID: "; ID
+    For i = 1 To 10
+        existsNow = (DCount("*", "t_Invoices", "InvoiceID=" & ID) > 0)
+        Debug.Print "t+" & i & "s: exists? "; existsNow
+
+        ' Simple 1-second delay
+        startTime = Timer
+        Do While Timer < startTime + 1
+            DoEvents
+        Loop
+    Next i
+
+    MsgBox "Finished polling InvoiceID=" & ID
+End Sub

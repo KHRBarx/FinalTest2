@@ -1,0 +1,26 @@
+Option Compare Database
+
+Public Function GetStandardNumber(ByVal QuoteID As Long) As String
+    On Error GoTo ErrHandler
+
+    Dim db As DAO.Database
+    Dim sql As String
+    Dim rs As DAO.Recordset
+
+    Set db = CurrentDb
+    sql = "SELECT t_Standards.stdNumber " & _
+          "FROM (t_Quotations " & _
+          "INNER JOIN t_AccreditedTests ON t_Quotations.StandardID = t_AccreditedTests.TestID) " & _
+          "INNER JOIN t_Standards ON t_AccreditedTests.Standard = t_Standards.ID_PurchasedStandards " & _
+          "WHERE t_Quotations.QuoteID = " & QuoteID & ";"
+
+    Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+    If Not rs.EOF Then GetStandardNumber = Nz(rs!stdNumber, "")
+    rs.Close
+
+    Exit Function
+
+ErrHandler:
+    Debug.Print "GetStandardNumber error: " & Err.Number & " - " & Err.Description
+    GetStandardNumber = ""
+End Function

@@ -1,0 +1,22 @@
+Option Compare Database
+Option Explicit
+
+Public Function RelinkTables(ByVal bePath As String) As Boolean
+    On Error GoTo ErrH
+    Dim db As DAO.Database, tdf As DAO.TableDef
+    Set db = CurrentDb
+    For Each tdf In db.TableDefs
+        If Len(tdf.connect) > 0 Then
+            If InStr(1, tdf.connect, "DATABASE=", vbTextCompare) > 0 Then
+                tdf.connect = "MS Access;DATABASE=" & bePath
+                tdf.RefreshLink
+            End If
+        End If
+    Next
+    RelinkTables = True
+ExitH:
+    Exit Function
+ErrH:
+    RelinkTables = False
+    Resume ExitH
+End Function

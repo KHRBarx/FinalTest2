@@ -1,0 +1,194 @@
+Option Compare Database
+Option Explicit
+
+'=========================================================
+' modEmail_Preview
+' Preview an email template directly from t_EmailTemplate.
+'
+' PreviewEmailTemplate TemplateID, [Optional InvoiceID]
+'   - If InvoiceID > 0: fills invoice placeholders from tables (like your invoice routine)
+'   - Else: uses demo/sample values so user can see the layout
+'=========================================================
+
+Public Sub PreviewEmailTemplate(ByVal TemplateID As Long, Optional ByVal InvoiceID As Long = 0)
+    On Error GoTo ErrHandler
+
+    '----- Read template row -----
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+
+    Dim tmplTo As String, tmplCc As String, tmplBcc As String
+    Dim tmplSubj As String, tmplBody As String
+
+    Set db = CurrentDb()
+
+    Set rs = db.OpenRecordset( _
+        "SELECT * FROM t_EmailTemplate WHERE ID=" & CLng(TemplateID), _
+        dbOpenSnapshot)
+
+    If rs Is Nothing Or rs.EOF Then
+        MsgBox "Email template not found (ID=" & TemplateID & ").", vbExclamation, "Preview email"
+        GoTo CleanExit
+    End If
+
+    tmplTo = Nz(rs!ToTemplate, "")
+    tmplCc = Nz(rs!CCTemplate, "")
+    tmplBcc = Nz(rs!BCCTemplate, "")
+    tmplSubj = Nz(rs!SubjectTemplate, "")
+    tmplBody = Nz(rs!BodyTemplate, "")
+
+    rs.Close
+    Set rs = Nothing
+
+    '----- Build placeholder map -----
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    If InvoiceID > 0 Then
+        FillInvoicePlaceholders dict, InvoiceID
+    Else
+        FillDemoPlaceholders dict
+    End If
+
+    '----- Apply replacements -----
+    Dim toAddr As String, ccAddr As String, bccAddr As String
+    Dim subj As String, bodyHtml As String
+
+    toAddr = ApplyReplacements(tmplTo, dict)
+    ccAddr = ApplyReplacements(tmplCc, dict)
+    bccAddr = ApplyReplacements(tmplBcc, dict)
+    subj = ApplyReplacements(tmplSubj, dict)
+    bodyHtml = ApplyReplacements(tmplBody, dict)
+
+    '----- Create Outlook draft -----
+    Dim OutlookApp As Object
+    Dim OutlookMail As Object
+
+    On Error Resume Next
+    Set OutlookApp = GetObject(, "Outlook.Application")
+    If OutlookApp Is Nothing Then Set OutlookApp = CreateObject("Outlook.Application")
+    On Error GoTo ErrHandler
+
+    If OutlookApp Is Nothing Then
+        MsgBox "Outlook could not be started. Draft email was not created.", vbExclamation, "Preview email"
+        GoTo CleanExit
+    End If
+
+    Set OutlookMail = OutlookApp.CreateItem(0)
+    With OutlookMail
+        .To = toAddr
+        .cc = ccAddr
+        .BCC = bccAddr
+        .Subject = subj
+        .htmlBody = bodyHtml
+        .Display
+    End With
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+    Set OutlookMail = Nothing
+    Set OutlookApp = Nothing
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Email preview failed: " & Err.Number & " - " & Err.Description, vbCritical, "Preview email"
+    Resume CleanExit
+End Sub
+
+Private Sub FillDemoPlaceholders(ByVal dict As Object)
+    'These are SAFE demo values so staff can preview layout without needing records.
+    dict("[ContactEmail]") = "contact@example.com"
+    dict("[ContactName]") = "A. Contact"
+    dict("[ClientName]") = "Example Client Ltd"
+    dict("[AccountsEmail]") = "accounts@example.com"
+
+    dict("[InvoiceRef]") = "D-INV-000123"
+    dict("[InvoiceNumber]") = "123"
+    dict("[QuoteNumber]") = "Q-000456"
+    dict("[PurchaseOrderRef]") = "PO-78910"
+    dict("[InvoiceValue]") = "£1,234.56"
+    dict("[DepositValue]") = "£1,234.56"
+End Sub
+
+Private Sub FillInvoicePlaceholders(ByVal dict As Object, ByVal InvoiceID As Long)
+    'Mirrors your existing lookup logic in modEmail_Invoices (but without PDF attachment).
+    Dim qid As Long, ClientID As Long, ContactID As Long
+    Dim InvoiceREF As String, quoteNum As String, purchaseRef As String
+    Dim ContactEmail As String, contactName As String, ClientName As String
+    Dim AccountsEmail As String
+    Dim invVal As String
+    Dim invoiceGross As Currency
+
+    InvoiceREF = Nz(DLookup("InvoiceREF", "t_Invoices", "InvoiceID=" & InvoiceID), "")
+    qid = Nz(DLookup("QuoteID", "t_Invoices", "InvoiceID=" & InvoiceID), 0)
+
+    If qid <> 0 Then
+        quoteNum = Nz(DLookup("QuoteNumber", "t_Quotations", "QuoteID=" & qid), "")
+        purchaseRef = Nz(DLookup("PurchaseOrderRef", "t_Orders", "QuoteID=" & qid), "")
+
+        ClientID = Nz(DLookup("ClientID", "t_Quotations", "QuoteID=" & qid), 0)
+
+        ContactID = Nz(DLookup("ContactID", "t_Orders", "QuoteID=" & qid), 0)
+        If ContactID = 0 Then
+            ContactID = Nz(DLookup("ContactID", "t_Quotations", "QuoteID=" & qid), 0)
+        End If
+    Else
+        quoteNum = ""
+        purchaseRef = ""
+        ClientID = Nz(DLookup("ClientID", "t_Invoices", "InvoiceID=" & InvoiceID), 0)
+        ContactID = 0
+    End If
+
+    If ClientID <> 0 Then
+        ClientName = Nz(DLookup("Client", "t_Clients", "ClientID=" & ClientID), "")
+        If Len(ClientName) = 0 Then
+            ClientName = Nz(DLookup("KnownAs", "t_Clients", "ClientID=" & ClientID), "")
+        End If
+        AccountsEmail = Nz(DLookup("HeadOfficeEmail", "t_Clients", "ClientID=" & ClientID), "")
+    Else
+        ClientName = ""
+        AccountsEmail = ""
+    End If
+
+    If ContactID <> 0 Then
+        ContactEmail = Nz(DLookup("EmailAddress", "t_Contacts", "ContactID=" & ContactID), "")
+        contactName = Nz(DLookup("ConcatName", "t_Contacts", "ContactID=" & ContactID), "")
+    Else
+        ContactEmail = ""
+        contactName = ""
+    End If
+
+    invoiceGross = CCur(Nz(DLookup("InvoiceIncVAT", "t_Invoices", "InvoiceID=" & InvoiceID), 0))
+    If invoiceGross <> 0 Then
+        invVal = Format$(invoiceGross, "£#,##0.00")
+    Else
+        invVal = Format$(CCur(Nz(DLookup("InvoiceValue", "t_Invoices", "InvoiceID=" & InvoiceID), 0)), "£#,##0.00")
+    End If
+
+    dict("[ContactEmail]") = ContactEmail
+    dict("[ContactName]") = contactName
+    dict("[ClientName]") = ClientName
+    dict("[AccountsEmail]") = AccountsEmail
+
+    dict("[InvoiceRef]") = InvoiceREF
+    dict("[InvoiceNumber]") = CStr(InvoiceID)
+    dict("[QuoteNumber]") = quoteNum
+    dict("[PurchaseOrderRef]") = purchaseRef
+    dict("[InvoiceValue]") = invVal
+    dict("[DepositValue]") = invVal
+End Sub
+
+Private Function ApplyReplacements(ByVal s As String, ByVal dict As Object) As String
+    Dim k As Variant
+    Dim out As String
+    out = Nz(s, "")
+
+    For Each k In dict.keys
+        out = Replace(out, CStr(k), Nz(dict(k), ""))
+    Next k
+
+    ApplyReplacements = out
+End Function

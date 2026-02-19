@@ -1,0 +1,79 @@
+Option Compare Database
+Option Explicit
+'Public Sub ExportAddressBook(Optional FieldList As String = "")
+'    Dim db As DAO.Database
+'    Dim rs As DAO.Recordset
+'    Dim xlApp As Object
+'    Dim xlWB As Object
+'    Dim xlWS As Object
+'    Dim i As Long
+'    Dim flds() As String
+'    Dim fieldName As String
+'    Dim colIndex As Long
+'
+'    Set db = CurrentDb()
+'
+'    ' Handle dynamic field selection
+'    Dim sql As String
+'    If FieldList <> "" Then
+'        sql = "SELECT " & FieldList & " FROM q_AddressBookMain"
+'    Else
+'        sql = "SELECT * FROM q_AddressBookMain"
+'    End If
+'
+'    Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+'
+'    Set xlApp = CreateObject("Excel.Application")
+'    Set xlWB = xlApp.Workbooks.Add
+'    Set xlWS = xlWB.Sheets(1)
+'
+'    ' Write column headers
+'    colIndex = 1
+'    For i = 0 To rs.Fields.Count - 1
+'        xlWS.Cells(1, colIndex).Value = rs.Fields(i).name
+'        colIndex = colIndex + 1
+'    Next i
+'
+'    ' Write data rows
+'    rs.MoveFirst
+'    xlWS.Range("A2").CopyFromRecordset rs
+'
+'    ' Optional: AutoFit columns
+'    xlWS.Columns.AutoFit
+'
+'    ' Save without prompt
+'    Dim filePath As String
+'    filePath = "C:\WORKING DOCS" & "\AccessAddressBook.xlsx"     'CurrentProject.Path
+'
+'    Dim fso As Object
+'Set fso = CreateObject("Scripting.FileSystemObject")
+'
+'If fso.FileExists(filePath) Then
+'    If MsgBox("File already exists. Overwrite?", vbYesNo + vbQuestion, "Confirm Overwrite") = vbNo Then
+'        xlWB.Close False
+'        xlApp.Quit
+'        Set rs = Nothing
+'        Set db = Nothing
+'        Set xlWS = Nothing
+'        Set xlWB = Nothing
+'        Set xlApp = Nothing
+'        Set fso = Nothing
+'        MsgBox "Export cancelled.", vbInformation
+'        Exit Sub
+'    End If
+'End If
+'
+'xlWB.SaveAs filePath
+'
+'    ' Cleanup
+'    xlWB.Close False
+'    xlApp.Quit
+'
+'    Set rs = Nothing
+'    Set db = Nothing
+'    Set xlWS = Nothing
+'    Set xlWB = Nothing
+'    Set xlApp = Nothing
+'
+'    MsgBox "Export complete: " & filePath, vbInformation
+'End Sub

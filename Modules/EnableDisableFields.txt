@@ -1,0 +1,132 @@
+Option Compare Database
+Option Explicit
+
+
+'#### ############################################################################################## ####
+'
+'     This section deals with enabling / disabling the controls on the form dependant on selections.
+'
+'#### ############################################################################################## ####
+
+
+
+'Private Sub HandleDeptSpecificSettings()
+'    Select Case Me.Dept.Value
+'
+'        Case "Acoustics"
+'
+'            Me.TestLength.Value = ""
+'            Me.TestLength.Enabled = False
+'            Me.NumWeeks.Value = ""
+'            Me.NumWeeks.Enabled = False
+'            Me.Leakage.Value = ""
+'            Me.Leakage.Enabled = False
+'            Me.T4Orientation.Value = ""
+'            Me.T4Orientation.Enabled = False
+'            Me.Homogeneity.Value = ""
+'            Me.Homogeneity.Enabled = False
+'            Me.OptionSelect.Value = ""
+'            Me.OptionSelect.Enabled = False
+'
+'            Me.NumDays.Enabled = True
+'            Me.NumTests.Enabled = True
+'
+'
+'        Case "Resistance"
+'
+'            If Me.Aperture.Value = "Air Leakage" Then ' SMOKE TIGHTNESS
+'                Me.T4Orientation.Value = ""
+'                Me.T4Orientation.Enabled = False
+'                Me.OptionSelect.Value = ""
+'                Me.OptionSelect.Enabled = False
+'                Me.TestLength.Enabled = False
+'                Me.NumWeeks.Value = ""
+'                Me.NumWeeks.Enabled = False
+'                Me.NumDays.Value = ""
+'                Me.NumDays.Enabled = False
+'                Me.Homogeneity.Value = ""
+'                Me.Homogeneity.Enabled = False
+'                Me.SCClass.Value = ""
+'                Me.SCClass.Enabled = False
+'                Me.SCRequired.Value = 0
+'                Me.SCRequired.Enabled = False
+'                Me.SCType.Value = ""
+'                Me.SCType.Enabled = False
+'
+'                Me.Leakage.Enabled = True
+'                Me.NumTests.Enabled = True
+'
+'            Else
+'                If Me.Aperture.Value = "Cladding Tower" Then ' 8414
+'                Me.T4Orientation.Value = ""
+'                Me.T4Orientation.Enabled = False
+'                Me.OptionSelect.Value = ""
+'                Me.OptionSelect.Enabled = False
+'                Me.TestLength.Enabled = False
+'                Me.NumWeeks.Value = ""
+'                Me.NumWeeks.Enabled = False
+'                Me.NumDays.Value = ""
+'                Me.NumDays.Enabled = False
+'                Me.Homogeneity.Value = ""
+'                Me.Homogeneity.Enabled = False
+'
+'                Me.Leakage.Enabled = True
+'                Me.NumTests.Enabled = True
+'
+'            Else                                             ' All other resistance
+'
+'                Me.T4Orientation.Value = ""
+'                Me.T4Orientation.Enabled = False
+'                Me.OptionSelect.Value = ""
+'                Me.OptionSelect.Enabled = False
+'                Me.NumWeeks.Value = ""
+'                Me.NumWeeks.Enabled = False
+'                Me.Leakage.Value = ""
+'                Me.Leakage.Enabled = False
+'                Me.NumDays.Value = ""
+'                Me.NumDays.Enabled = False
+'                Me.Homogeneity.Value = ""
+'                Me.Homogeneity.Enabled = False
+'
+'                Me.TestLength.Enabled = True
+'                Me.NumTests.Enabled = True
+'
+'            End If
+'            End If
+'
+'        Case "Calculations"
+'
+'            Me.TestLength.Value = ""
+'            Me.TestLength.Enabled = False
+'            Me.NumWeeks.Value = ""
+'            Me.NumWeeks.Enabled = False
+'            Me.NumDays.Value = ""
+'            Me.NumDays.Enabled = False
+'            Me.Leakage.Value = ""
+'            Me.Leakage.Enabled = False
+'            Me.T4Orientation.Value = ""
+'            Me.T4Orientation.Enabled = False
+'            Me.Homogeneity.Value = ""
+'            Me.Homogeneity.Enabled = False
+'            Me.OptionSelect.Value = ""
+'            Me.OptionSelect.Enabled = False
+'            Me.NumDays.Value = ""
+'            Me.NumDays.Enabled = False
+'            Me.T4Orientation.Value = ""
+'            Me.T4Orientation.Enabled = False
+'            Me.WasteVolume.Value = ""
+'            Me.WasteVolume.Enabled = False
+'            Me.SCClass.Value = ""
+'            Me.SCClass.Enabled = False
+'            Me.SCRequired.Value = 0
+'            Me.SCRequired.Enabled = False
+'            Me.SCType.Value = ""
+'            Me.SCType.Enabled = False
+'            Me.ARTCDisposal.Value = ""
+'            Me.ARTCDisposal.Enabled = False
+'
+'            Me.NumTests.Enabled = True
+'
+'
+'End Select
+'End Sub

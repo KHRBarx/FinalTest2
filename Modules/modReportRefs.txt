@@ -1,0 +1,405 @@
+Option Compare Database
+Option Explicit
+
+'====================================================
+' modReportRefs
+' Centralised ReportREF / Report Number generation + parsing helpers
+'
+' Extracted from f_Reports to keep the form module lean.
+'====================================================
+
+'-----------------------------
+' QuoteNumber -> 7 digits
+'  Expected format: Q####### (e.g. Q2601001) or similar where digits start at pos 2.
+'-----------------------------
+Public Function GetQuoteDigits_2to8(ByVal QuoteNumber As String) As String
+    QuoteNumber = Trim$(Nz(QuoteNumber, vbNullString))
+    If Len(QuoteNumber) >= 8 Then
+        GetQuoteDigits_2to8 = Mid$(QuoteNumber, 2, 7)
+    Else
+        GetQuoteDigits_2to8 = vbNullString
+    End If
+End Function
+
+'====================================
+' ReportREF helpers
+' - With FinalVersion embedded, refs look like:
+'     R2601001.2.1   or   R2601001.c1.1   or   R2601001.a3.12.1
+' - Base ref (without final) is:
+'     R2601001.2     or   R2601001.c1     or   R2601001.a3.12
+'====================================
+Public Function BaseReportRef(ByVal s As String) As String
+    'Previously this stripped a trailing numeric token assumed to be FinalVersion when
+    'ReportREFs were of the form R#######.<type><n>.<FinalVersion>.
+    '
+    'Current model: ReportREF is ALWAYS the base ref (no embedded FinalVersion),
+    'e.g. R2601001.1 or R2601001.e1 or R2601001.a3.12
+    'So this function now returns the input unchanged (fail-soft trimming only).
+
+    s = Trim$(Nz(s, vbNullString))
+    BaseReportRef = s
+End Function
+
+Public Function StripFinalSuffixIfPresent(ByVal s As String) As String
+    'Alias for clarity at insert/update sites
+    StripFinalSuffixIfPresent = BaseReportRef(s)
+End Function
+
+'====================================================
+' Parsing: report index segment (after FIRST dot)
+'====================================================
+Public Function ParseSuffixNumber(ByVal ReportREF As String, ByVal suffixLetter As String) As Long
+    'Parses the report-index segment (after the FIRST dot) for refs like:
+    '   R2601001.c1.1  -> suffixLetter="c" returns 1
+    '   R2601001.2.1   -> suffixLetter="" returns 2
+    On Error GoTo CleanFail
+
+    Dim base As String
+    base = BaseReportRef(ReportREF)
+
+    Dim p1 As Long
+    p1 = InStr(1, base, ".")
+    If p1 = 0 Then GoTo CleanFail
+
+    Dim seg As String
+    Dim p2 As Long
+    p2 = InStr(p1 + 1, base, ".")
+    If p2 = 0 Then
+        seg = Mid$(base, p1 + 1)
+    Else
+        seg = Mid$(base, p1 + 1, p2 - p1 - 1)
+    End If
+
+    seg = Trim$(seg)
+    If Len(seg) = 0 Then GoTo CleanFail
+
+    If Len(suffixLetter) > 0 Then
+        If LCase$(Left$(seg, 1)) <> LCase$(suffixLetter) Then GoTo CleanFail
+        seg = Mid$(seg, 2)
+    End If
+
+    If IsNumeric(seg) Then
+        ParseSuffixNumber = CLng(seg)
+        Exit Function
+    End If
+
+CleanFail:
+    ParseSuffixNumber = 0
+End Function
+
+Public Function ParseTrailingNumberAfterDot(ByVal s As String) As Long
+        'Returns the report index number from the segment after the FIRST dot (not the final version):
+    '   R2601001.2.1   -> 2
+    '   R2601001.c1.1  -> 1
+    On Error GoTo CleanFail
+
+    Dim base As String
+    base = BaseReportRef(s)
+
+    Dim p1 As Long
+    p1 = InStr(1, base, ".")
+    If p1 = 0 Then GoTo CleanFail
+
+    Dim seg As String
+    Dim p2 As Long
+    p2 = InStr(p1 + 1, base, ".")
+    If p2 = 0 Then
+        seg = Mid$(base, p1 + 1)
+    Else
+        seg = Mid$(base, p1 + 1, p2 - p1 - 1)
+    End If
+
+    seg = Trim$(seg)
+    If Len(seg) = 0 Then GoTo CleanFail
+
+    'Allow leading letter (c/s/e/a etc.) then digits
+    If Not IsNumeric(seg) Then
+        If Len(seg) >= 2 And IsNumeric(Mid$(seg, 2)) Then
+            seg = Mid$(seg, 2)
+        Else
+            GoTo CleanFail
+        End If
+    End If
+
+    ParseTrailingNumberAfterDot = CLng(seg)
+    Exit Function
+
+CleanFail:
+    ParseTrailingNumberAfterDot = 0
+End Function
+
+'====================================================
+' Sequencing: MAIN refs
+'====================================================
+Public Function GetNextSuffixForOrder( _
+    ByVal db As DAO.Database, _
+    ByVal specimenTable As String, _
+    ByVal orderIdField As String, _
+    ByVal OrderID As Long, _
+    ByVal reportField As String, _
+    ByVal suffixLetter As String) As Long
+
+    On Error GoTo ErrHandler
+
+    Dim sql As String
+    sql = "SELECT [" & reportField & "] AS RefVal " & _
+          "FROM " & specimenTable & " " & _
+          "WHERE [" & orderIdField & "]=" & OrderID & " " & _
+          "AND [" & reportField & "] Is Not Null " & _
+          "AND [" & reportField & "]<>'';"
+
+    Dim rs As DAO.Recordset
+    Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+
+    Dim maxN As Long: maxN = 0
+    Dim ref As String, n As Long
+
+    Do While Not rs.EOF
+        ref = Nz(rs!RefVal, vbNullString)
+        n = ParseSuffixNumber(ref, suffixLetter)
+        If n > maxN Then maxN = n
+        rs.MoveNext
+    Loop
+
+    rs.Close
+    Set rs = Nothing
+
+    GetNextSuffixForOrder = maxN + 1
+    Exit Function
+
+ErrHandler:
+    GetNextSuffixForOrder = 1
+End Function
+
+'====================================================
+' Sequencing: ADDITIONAL TECH refs
+'   Prefix: R#######.aX.
+'====================================================
+Public Function GetNextATechN_FromTracker( _
+    ByVal db As DAO.Database, _
+    ByVal trackerTable As String, _
+    ByVal trackerOrderIdField As String, _
+    ByVal trackerReportRefField As String, _
+    ByVal OrderID As Long, _
+    ByVal baseDigits As String, _
+    ByVal techX As Long) As Long
+
+    On Error GoTo ErrHandler
+
+    Dim Prefix As String
+    Prefix = "R" & baseDigits & ".a" & CStr(techX) & "."
+
+    Dim sql As String
+    sql = "SELECT [" & trackerReportRefField & "] AS ReportREF " & _
+          "FROM " & trackerTable & _
+          " WHERE [" & trackerOrderIdField & "]=" & OrderID & _
+          " AND [" & trackerReportRefField & "] Like " & SqlText(Prefix & "*") & ";"
+
+    Dim rs As DAO.Recordset
+    Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+
+    Dim maxN As Long: maxN = 0
+    Dim ref As String, n As Long
+
+    Do While Not rs.EOF
+        ref = Nz(rs!ReportREF, vbNullString)
+        n = ParseATechN_FromRef(ref, Prefix)
+        If n > maxN Then maxN = n
+        rs.MoveNext
+    Loop
+
+    rs.Close
+    Set rs = Nothing
+
+    GetNextATechN_FromTracker = maxN + 1
+    Exit Function
+
+ErrHandler:
+    GetNextATechN_FromTracker = 1
+End Function
+
+Public Function ParseATechN_FromRef(ByVal ReportREF As String, ByVal Prefix As String) As Long
+    'Supports refs with FinalVersion, e.g.:
+    '   Prefix="R2601001.a3."  ReportREF="R2601001.a3.12.1" -> 12
+    On Error GoTo CleanFail
+
+    If Len(Prefix) = 0 Then GoTo CleanFail
+
+    Dim base As String
+    base = BaseReportRef(ReportREF)
+
+    If LCase$(Left$(base, Len(Prefix))) <> LCase$(Prefix) Then GoTo CleanFail
+
+    Dim tail As String
+    tail = Mid$(base, Len(Prefix) + 1)
+
+    'If any extra dot exists, take first token
+    Dim p As Long
+    p = InStr(1, tail, ".")
+    If p > 0 Then tail = Left$(tail, p - 1)
+
+    If IsNumeric(tail) Then
+        ParseATechN_FromRef = CLng(tail)
+        Exit Function
+    End If
+
+CleanFail:
+    ParseATechN_FromRef = 0
+End Function
+
+'-----------------------------
+' Internal helper (safe SQL string literal)
+'-----------------------------
+
+
+'====================================================
+' Version helpers (per current model)
+'   FinalVersion: LONG (X)
+'   ReportVersion: SHORT TEXT "X.Y"
+'====================================================
+Public Function ComposeReportVersionText(ByVal FinalVersion As Long, ByVal DraftVersion As Long) As String
+    If FinalVersion <= 0 Then FinalVersion = 1
+    If DraftVersion <= 0 Then DraftVersion = 1
+    ComposeReportVersionText = CStr(FinalVersion) & "." & CStr(DraftVersion)
+End Function
+
+Public Function TryParseReportVersionText(ByVal s As String, ByRef FinalVersion As Long, ByRef DraftVersion As Long) As Boolean
+    On Error GoTo Fail
+
+    s = Trim$(Nz(s, vbNullString))
+    If Len(s) = 0 Then GoTo Fail
+
+    Dim parts() As String
+    parts = Split(s, ".")
+    If UBound(parts) <> 1 Then GoTo Fail
+
+    If Not IsNumeric(parts(0)) Then GoTo Fail
+    If Not IsNumeric(parts(1)) Then GoTo Fail
+
+    FinalVersion = CLng(parts(0))
+    DraftVersion = CLng(parts(1))
+
+    If FinalVersion <= 0 Or DraftVersion <= 0 Then GoTo Fail
+
+    TryParseReportVersionText = True
+    Exit Function
+
+Fail:
+    TryParseReportVersionText = False
+End Function
+
+Private Function SqlText(ByVal s As String) As String
+    SqlText = "'" & Replace(Nz(s, vbNullString), "'", "''") & "'"
+End Function
+
+
+'====================================================
+' Version bump helper for rejection workflow
+'  - Draft rejection (DraftOrFinal=1): increments Y in X.Y
+'  - Final rejection  (DraftOrFinal=2): increments X and resets Y=1
+' Updates t_ReportTracker.ReportVersion (and FinalVersion if that field exists)
+'====================================================
+Public Function BumpReportVersionForRejection(ByVal ReportID As Long, ByVal DraftOrFinal As Long, Optional ByVal Force As Boolean = False) As String
+    On Error GoTo EH
+
+    Dim db As DAO.Database
+    Dim curRV As String
+    Dim x As Long, y As Long
+    Dim newX As Long, newY As Long
+    Dim whereCrit As String
+    Dim sql As String
+    Dim tries As Long
+    Dim hasFinalVersionField As Boolean
+
+    If ReportID <= 0 Then
+        BumpReportVersionForRejection = vbNullString
+        Exit Function
+    End If
+
+    Set db = CurrentDb
+    whereCrit = "[ReportID]=" & CLng(ReportID)
+
+    curRV = Trim$(CStr(Nz(DLookup("ReportVersion", "t_ReportTracker", whereCrit), vbNullString)))
+
+    If Len(curRV) = 0 Then
+        'Defensive default
+        curRV = "1.1"
+    End If
+
+    If Not TryParseReportVersionText(curRV, x, y) Then
+        'If malformed, reset safely
+        x = 1: y = 1
+    End If
+
+    Select Case CLng(DraftOrFinal)
+        Case 2 'Final reject -> bump X, reset Y
+            newX = x + 1
+            newY = 1
+        Case Else 'Draft reject (or unknown) -> bump Y
+            newX = x
+            newY = y + 1
+    End Select
+
+    BumpReportVersionForRejection = ComposeReportVersionText(newX, newY)
+
+    'Check if t_ReportTracker has a FinalVersion field; keep in sync if present
+    hasFinalVersionField = False
+    On Error Resume Next
+    Dim tdf As DAO.TableDef, fld As DAO.Field
+    Set tdf = db.TableDefs("t_ReportTracker")
+    If Err.Number = 0 Then
+        For Each fld In tdf.fields
+            If StrComp(fld.Name, "FinalVersion", vbTextCompare) = 0 Then
+                hasFinalVersionField = True
+                Exit For
+            End If
+        Next fld
+    End If
+    Set tdf = Nothing
+    Set fld = Nothing
+    On Error GoTo EH
+
+    'Optimistic concurrency update: only update if version hasn't changed, retry a few times
+    For tries = 1 To 3
+        If hasFinalVersionField Then
+            sql = "UPDATE t_ReportTracker SET " & _
+                  "ReportVersion='" & Replace(BumpReportVersionForRejection, "'", "''") & "', " & _
+                  "FinalVersion=" & CLng(newX) & " " & _
+                  "WHERE " & whereCrit & _
+                  IIf(Force, ";", " AND Nz([ReportVersion],'')='" & Replace(curRV, "'", "''") & "';")
+        Else
+            sql = "UPDATE t_ReportTracker SET " & _
+                  "ReportVersion='" & Replace(BumpReportVersionForRejection, "'", "''") & "' " & _
+                  "WHERE " & whereCrit & _
+                  IIf(Force, ";", " AND Nz([ReportVersion],'')='" & Replace(curRV, "'", "''") & "';")
+        End If
+
+        db.Execute sql, dbFailOnError
+
+        If db.RecordsAffected > 0 Then Exit For
+
+        'Someone else changed it; re-read and recalc once
+        curRV = Trim$(CStr(Nz(DLookup("ReportVersion", "t_ReportTracker", whereCrit), vbNullString)))
+        If Len(curRV) = 0 Then curRV = "1.1"
+        If Not TryParseReportVersionText(curRV, x, y) Then
+            x = 1: y = 1
+        End If
+
+        Select Case CLng(DraftOrFinal)
+            Case 2
+                newX = x + 1
+                newY = 1
+            Case Else
+                newX = x
+                newY = y + 1
+        End Select
+
+        BumpReportVersionForRejection = ComposeReportVersionText(newX, newY)
+    Next tries
+
+    Exit Function
+
+EH:
+    'Fail quietly to avoid breaking UI flow; caller can decide how to handle
+    BumpReportVersionForRejection = vbNullString
+End Function

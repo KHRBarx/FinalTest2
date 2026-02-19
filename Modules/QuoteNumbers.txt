@@ -1,0 +1,61 @@
+Option Compare Database
+Option Explicit
+Function GenerateQuotationNumber() As String
+
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim currentDate As Date
+    Dim yearPart As String
+    Dim monthPart As String
+    Dim numberPart As String
+    Dim serialDate As Date
+    Dim lastSerial As String
+    Dim newSerial As String
+    Dim lastNumber As Integer
+    
+    ' Retrieve the Windows username
+    Dim strUserName As String
+    strUserName = Environ("USERNAME")
+    
+    ' Inject the username into the UserID field
+    'UserID.Value = strUserName
+
+    Set db = CurrentDb()
+    currentDate = Date
+    yearPart = Format(currentDate, "YY")
+    monthPart = Format(currentDate, "MM")
+
+    ' Find the last serial number for the current year and month
+    Set rs = db.OpenRecordset("SELECT TOP 1 QuoteNumber FROM x_QNumbers " & _
+                              "WHERE Format(QuoteDate, 'YYMM') = '" & yearPart & monthPart & "' " & _
+                              "ORDER BY QuoteNumber DESC")
+    
+    If rs.EOF Then
+        ' No serial number for this month yet
+        lastNumber = 0
+    Else
+        ' Extract the numeric part of the last serial number
+        lastSerial = rs!QuoteNumber
+        lastNumber = CInt(Right(lastSerial, 3))
+    End If
+
+    ' Generate the new serial number
+    newSerial = "Q" & yearPart & monthPart & Format(lastNumber + 1, "000")
+    
+    ' Store the new serial number in the SerialNumbers table
+    Set rs = db.OpenRecordset("x_QNumbers", dbOpenDynaset)
+    rs.AddNew
+    rs!QuoteDate = currentDate
+    rs!QuoteNumber = newSerial
+    rs!userName = strUserName
+    rs.Update
+
+    ' Return the new serial number
+    GenerateQuotationNumber = newSerial
+
+    ' Clean up
+    rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+    
+End Function

@@ -1,0 +1,18 @@
+Option Compare Database
+Option Explicit
+
+' Re-usable helper for checking whether a field exists in a DAO.Recordset
+Public Function FieldExistsRS(rs As DAO.Recordset, fieldName As String) As Boolean
+    Dim fld As DAO.Field
+
+    FieldExistsRS = False
+
+    If rs Is Nothing Then Exit Function
+
+    For Each fld In rs.fields
+        If StrComp(fld.Name, fieldName, vbTextCompare) = 0 Then
+            FieldExistsRS = True
+            Exit Function
+        End If
+    Next fld
+End Function

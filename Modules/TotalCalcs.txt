@@ -1,0 +1,14 @@
+Option Compare Database
+Option Explicit
+
+Public Function SubTotal(SubRptCtl As Control, SumCtlName As String) As Double
+    On Error GoTo EH
+    If Not SubRptCtl Is Nothing Then
+        If SubRptCtl.Report.HasData Then
+            SubTotal = Nz(SubRptCtl.Report.Controls(SumCtlName).value, 0)
+        End If
+    End If
+    Exit Function
+EH:
+    SubTotal = 0
+End Function

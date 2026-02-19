@@ -1,0 +1,24 @@
+Option Compare Database
+Option Explicit
+Public Declare PtrSafe Function ShowWindow Lib "user32" ( _
+    ByVal hwnd As LongPtr, _
+    ByVal nCmdShow As Long) As Long
+
+Public Declare PtrSafe Function FindWindowA Lib "user32" ( _
+    ByVal lpClassName As String, _
+    ByVal lpWindowName As String) As LongPtr
+
+Public Const SW_HIDE = 0
+Public Const SW_SHOW = 5
+
+Public Sub HideAccessWindow()
+    Dim hWndAccess As LongPtr
+    hWndAccess = FindWindowA("OMain", vbNullString)
+    ShowWindow hWndAccess, SW_HIDE
+End Sub
+
+Public Sub ShowAccessWindow()
+    Dim hWndAccess As LongPtr
+    hWndAccess = FindWindowA("OMain", vbNullString)
+    ShowWindow hWndAccess, SW_SHOW
+End Sub

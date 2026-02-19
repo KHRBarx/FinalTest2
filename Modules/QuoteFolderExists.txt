@@ -1,0 +1,46 @@
+Public Sub EnsureFolderExistsFSO(ByVal folderPath As String)
+    ' Creates folderPath and any missing parent folders.
+    ' Handles UNC paths (\\server\share\...) correctly.
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    folderPath = Trim$(folderPath)
+    If Len(folderPath) = 0 Then Exit Sub
+
+    ' Normalise trailing backslash
+    If Right$(folderPath, 1) = "\" Then
+        folderPath = Left$(folderPath, Len(folderPath) - 1)
+    End If
+
+    If fso.FolderExists(folderPath) Then Exit Sub
+
+    Dim buildPath As String
+    Dim parts() As String
+    Dim i As Long
+
+    ' UNC path?
+    If Left$(folderPath, 2) = "\\" Then
+        ' Split: \\server\share\rest\of\path
+        parts = Split(Mid$(folderPath, 3), "\")
+        If UBound(parts) < 1 Then Exit Sub  ' must have server + share
+
+        buildPath = "\\" & parts(0) & "\" & parts(1)   ' \\server\share
+
+        ' Create remaining folders under the share
+        For i = 2 To UBound(parts)
+            buildPath = buildPath & "\" & parts(i)
+            If Not fso.FolderExists(buildPath) Then fso.CreateFolder buildPath
+        Next i
+
+    Else
+        ' Local path (e.g. C:\...)
+        parts = Split(folderPath, "\")
+        buildPath = parts(0) ' e.g. "C:"
+
+        For i = 1 To UBound(parts)
+            buildPath = buildPath & "\" & parts(i)
+            If Not fso.FolderExists(buildPath) Then fso.CreateFolder buildPath
+        Next i
+    End If
+End Sub

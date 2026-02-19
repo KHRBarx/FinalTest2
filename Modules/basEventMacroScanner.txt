@@ -1,0 +1,523 @@
+'============================================================
+' Purpose:
+'   Scan Forms/Reports for event-property bindings (VBA, Macro,
+'   Embedded Macro, expressions) and export deterministic CSVs.
+'
+' Output (default):
+'   <CurrentProject.Path>\access_src\Schema_FrontEnd\EventBindings_Forms.csv
+'   <CurrentProject.Path>\access_src\Schema_FrontEnd\EventBindings_Reports.csv
+'   <CurrentProject.Path>\access_src\Schema_FrontEnd\EventBindings_ObjectEvents.csv
+'   <CurrentProject.Path>\access_src\Schema_FrontEnd\EventBindings_MacrosList.csv
+'
+' Run:
+'   Immediate Window:  ExportEventBindings_All
+'
+'============================================================
+
+Option Compare Database
+Option Explicit
+
+'--- change this if you want a different output folder (relative to CurrentProject.Path)
+Private Const REPO_ROOT As String = "C:\Repos\access-app-source-test"
+Private Const DEFAULT_OUTDIR_REL As String = "access_src\Schema_FrontEnd"
+
+'==========================
+' Public entrypoint
+'==========================
+Public Sub ExportEventBindings_All()
+    Dim outDir As String
+    outDir = GetDefaultOutDir()
+    EnsureFolder outDir
+
+    Dim rowsForms() As TRow, nForms As Long
+    Dim rowsReports() As TRow, nReports As Long
+    Dim rowsObjEvents() As TRow, nObjEvents As Long
+
+    nForms = 0: nReports = 0: nObjEvents = 0
+
+    ScanAllForms rowsForms, nForms, rowsObjEvents, nObjEvents
+    ScanAllReports rowsReports, nReports, rowsObjEvents, nObjEvents
+
+    SortRows rowsForms, nForms
+    SortRows rowsReports, nReports
+    SortRows rowsObjEvents, nObjEvents
+
+    WriteRowsToCsv outDir & "\EventBindings_Forms.csv", rowsForms, nForms
+    WriteRowsToCsv outDir & "\EventBindings_Reports.csv", rowsReports, nReports
+    WriteRowsToCsv outDir & "\EventBindings_ObjectEvents.csv", rowsObjEvents, nObjEvents
+
+    ExportMacroNameList outDir & "\EventBindings_MacrosList.csv"
+
+    Debug.Print "Export complete:"
+    Debug.Print "  " & outDir & "\EventBindings_Forms.csv"
+    Debug.Print "  " & outDir & "\EventBindings_Reports.csv"
+    Debug.Print "  " & outDir & "\EventBindings_ObjectEvents.csv"
+    Debug.Print "  " & outDir & "\EventBindings_MacrosList.csv"
+End Sub
+
+'==========================
+' Scanners
+'==========================
+Private Sub ScanAllForms(ByRef rows() As TRow, ByRef n As Long, _
+                         ByRef objRows() As TRow, ByRef nObj As Long)
+    Dim names() As String
+    names = GetSortedAllObjectNames(acForm)
+
+    Dim i As Long, objName As String
+    For i = LBound(names) To UBound(names)
+        objName = names(i)
+        If Len(objName) > 0 Then
+            ScanOneForm objName, rows, n, objRows, nObj
+        End If
+    Next i
+End Sub
+
+Private Sub ScanAllReports(ByRef rows() As TRow, ByRef n As Long, _
+                           ByRef objRows() As TRow, ByRef nObj As Long)
+    Dim names() As String
+    names = GetSortedAllObjectNames(acReport)
+
+    Dim i As Long, objName As String
+    For i = LBound(names) To UBound(names)
+        objName = names(i)
+        If Len(objName) > 0 Then
+            ScanOneReport objName, rows, n, objRows, nObj
+        End If
+    Next i
+End Sub
+
+Private Sub ScanOneForm(ByVal FormName As String, ByRef rows() As TRow, ByRef n As Long, _
+                        ByRef objRows() As TRow, ByRef nObj As Long)
+    Dim wasLoaded As Boolean
+    wasLoaded = IsFormLoaded(FormName)
+
+    Dim frm As Access.Form
+    If wasLoaded Then
+        Set frm = Forms(FormName)
+        ScanObjectEvents "Form", FormName, frm, objRows, nObj
+        ScanControls "Form", FormName, frm, rows, n
+    Else
+        On Error GoTo CleanFail
+        DoCmd.OpenForm FormName, acDesign, , , , acHidden
+        Set frm = Forms(FormName)
+
+        ScanObjectEvents "Form", FormName, frm, objRows, nObj
+        ScanControls "Form", FormName, frm, rows, n
+
+CleanExit:
+        On Error Resume Next
+        DoCmd.Close acForm, FormName, acSaveNo
+        On Error GoTo 0
+        Exit Sub
+
+CleanFail:
+
+        Dim rr As TRow
+        rr = MakeRow( _
+            "Form", FormName, "", "", "", "", "Error", _
+            "Failed to open/scan form: " & Err.Number & " - " & Err.Description)
+        AppendRow objRows, nObj, rr
+
+        Resume CleanExit
+    End If
+End Sub
+
+Private Sub ScanOneReport(ByVal reportName As String, ByRef rows() As TRow, ByRef n As Long, _
+                          ByRef objRows() As TRow, ByRef nObj As Long)
+    Dim wasLoaded As Boolean
+    wasLoaded = IsReportLoaded(reportName)
+
+    Dim rpt As Access.Report
+    If wasLoaded Then
+        Set rpt = Reports(reportName)
+        ScanObjectEvents "Report", reportName, rpt, objRows, nObj
+        ScanControls "Report", reportName, rpt, rows, n
+    Else
+        On Error GoTo CleanFail
+        DoCmd.OpenReport reportName, acDesign, , , acHidden
+        Set rpt = Reports(reportName)
+
+        ScanObjectEvents "Report", reportName, rpt, objRows, nObj
+        ScanControls "Report", reportName, rpt, rows, n
+
+CleanExit:
+        On Error Resume Next
+        DoCmd.Close acReport, reportName, acSaveNo
+        On Error GoTo 0
+        Exit Sub
+
+CleanFail:
+
+        Dim rr As TRow
+        rr = MakeRow( _
+            "Report", reportName, "", "", "", "", "Error", _
+            "Failed to open/scan report: " & Err.Number & " - " & Err.Description)
+        AppendRow objRows, nObj, rr
+
+        Resume CleanExit
+    End If
+End Sub
+
+Private Sub ScanControls(ByVal objType As String, ByVal objName As String, ByVal host As Object, _
+                         ByRef rows() As TRow, ByRef n As Long)
+    Dim ctl As Control
+    For Each ctl In host.Controls
+        ScanOneControl objType, objName, ctl, rows, n
+    Next ctl
+End Sub
+
+Private Sub ScanOneControl(ByVal objType As String, ByVal objName As String, ByVal ctl As Control, _
+                           ByRef rows() As TRow, ByRef n As Long)
+    Dim evs As Variant
+    evs = GetControlEventProps()
+
+    Dim i As Long, propName As String, val As String, kind As String
+    For i = LBound(evs) To UBound(evs)
+        propName = CStr(evs(i))
+        val = GetEventPropValue(ctl, propName)
+        If Len(val) > 0 Then
+            kind = ClassifyBinding(val)
+            
+            Dim r As TRow
+            r = MakeRow(objType, objName, ctl.Name, TypeName(ctl), propName, val, kind, "")
+            AppendRow rows, n, r
+
+        End If
+    Next i
+End Sub
+
+Private Sub ScanObjectEvents(ByVal objType As String, ByVal objName As String, ByVal host As Object, _
+                             ByRef rows() As TRow, ByRef n As Long)
+    Dim evs As Variant
+    evs = GetObjectEventProps(objType)
+
+    Dim i As Long, propName As String, val As String, kind As String
+    For i = LBound(evs) To UBound(evs)
+        propName = CStr(evs(i))
+        val = GetEventPropValue(host, propName)
+        If Len(val) > 0 Then
+            kind = ClassifyBinding(val)
+            
+            Dim r As TRow
+            r = MakeRow(objType, objName, "(Object)", objType, propName, val, kind, "")
+            AppendRow rows, n, r
+
+        End If
+    Next i
+End Sub
+
+'==========================
+' Event-property lists
+'==========================
+Private Function GetControlEventProps() As Variant
+    ' Add/remove as needed; these are VBA property names (no spaces)
+    GetControlEventProps = Array( _
+        "OnClick", "OnDblClick", _
+        "OnMouseDown", "OnMouseUp", "OnMouseMove", _
+        "OnKeyDown", "OnKeyUp", "OnKeyPress", _
+        "OnEnter", "OnExit", "OnGotFocus", "OnLostFocus", _
+        "BeforeUpdate", "AfterUpdate", "OnChange", _
+        "OnDirty" _
+    )
+End Function
+
+Private Function GetObjectEventProps(ByVal objType As String) As Variant
+    If LCase$(objType) = "report" Then
+        GetObjectEventProps = Array( _
+            "OnOpen", "OnClose", _
+            "OnActivate", "OnDeactivate", _
+            "OnNoData", "OnError", _
+            "OnTimer" _
+        )
+    Else
+        ' Form
+        GetObjectEventProps = Array( _
+            "OnOpen", "OnClose", "OnLoad", "OnUnload", _
+            "OnCurrent", "BeforeUpdate", "AfterUpdate", _
+            "OnInsert", "OnDelete", "OnError", _
+            "OnResize", "OnTimer", _
+            "OnKeyDown", "OnKeyUp", "OnKeyPress" _
+        )
+    End If
+End Function
+
+'==========================
+' Property access + classification
+'==========================
+Private Function GetEventPropValue(ByVal obj As Object, ByVal propName As String) As String
+    On Error GoTo EH
+    Dim v As Variant
+    v = CallByName(obj, propName, VbGet)
+
+    If IsNull(v) Then
+        GetEventPropValue = ""
+    Else
+        GetEventPropValue = CStr(v)
+    End If
+    Exit Function
+EH:
+    ' Property not supported on this object/control
+    GetEventPropValue = ""
+End Function
+
+Private Function ClassifyBinding(ByVal eventValue As String) As String
+    Dim s As String
+    s = LCase$(Trim$(eventValue))
+
+    If Len(s) = 0 Then
+        ClassifyBinding = "Empty"
+    ElseIf s = "[event procedure]" Then
+        ClassifyBinding = "VBA_EventProcedure"
+    ElseIf Left$(s, 1) = "=" Then
+        ClassifyBinding = "Expression"
+    ElseIf InStr(1, s, "embedded macro", vbTextCompare) > 0 Then
+        ClassifyBinding = "EmbeddedMacro"
+    Else
+        ' Typically a named macro (or sometimes a legacy command)
+        ClassifyBinding = "MacroOrOther"
+    End If
+End Function
+
+'==========================
+' Output helpers
+'==========================
+Private Sub WriteRowsToCsv(ByVal filePath As String, ByRef rows() As TRow, ByVal n As Long)
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Output As #f
+    Print #f, "ObjectType,ObjectName,ControlName,ControlType,EventProperty,EventValue,BindingKind,Notes"
+
+    Dim i As Long
+    For i = 1 To n
+        Print #f, CsvEscape(rows(i).ObjectType) & "," & _
+                  CsvEscape(rows(i).ObjectName) & "," & _
+                  CsvEscape(rows(i).ControlName) & "," & _
+                  CsvEscape(rows(i).ControlType) & "," & _
+                  CsvEscape(rows(i).EventProperty) & "," & _
+                  CsvEscape(rows(i).eventValue) & "," & _
+                  CsvEscape(rows(i).BindingKind) & "," & _
+                  CsvEscape(rows(i).Notes)
+    Next i
+
+    Close #f
+End Sub
+
+Private Function CsvEscape(ByVal s As String) As String
+    Dim t As String
+    t = Replace(s, """", """""")
+    If InStr(1, t, ",") > 0 Or InStr(1, t, vbCr) > 0 Or InStr(1, t, vbLf) > 0 Or InStr(1, t, """") > 0 Then
+        CsvEscape = """" & t & """"
+    Else
+        CsvEscape = t
+    End If
+End Function
+
+Private Function MakeRow(ByVal objType As String, ByVal objName As String, _
+                         ByVal ctlName As String, ByVal ctlType As String, _
+                         ByVal evProp As String, ByVal evVal As String, _
+                         ByVal kind As String, ByVal Notes As String) As TRow
+    Dim r As TRow
+    r.ObjectType = objType
+    r.ObjectName = objName
+    r.ControlName = ctlName
+    r.ControlType = ctlType
+    r.EventProperty = evProp
+    r.eventValue = evVal
+    r.BindingKind = kind
+    r.Notes = Notes
+
+    ' Deterministic sort key
+    r.SortKey = LCase$(objType) & "|" & LCase$(objName) & "|" & LCase$(ctlName) & "|" & LCase$(evProp)
+
+    MakeRow = r
+End Function
+
+Private Sub AppendRow(ByRef rows() As TRow, ByRef n As Long, ByRef r As TRow)
+    n = n + 1
+    If n = 1 Then
+        ReDim rows(1 To 1)
+    Else
+        ReDim Preserve rows(1 To n)
+    End If
+    rows(n) = r
+End Sub
+
+'==========================
+' Sorting (stable enough for diffs)
+'==========================
+Private Sub SortRows(ByRef rows() As TRow, ByVal n As Long)
+    If n <= 1 Then Exit Sub
+    QuickSortRows rows, 1, n
+End Sub
+
+Private Sub QuickSortRows(ByRef rows() As TRow, ByVal lo As Long, ByVal hi As Long)
+    Dim i As Long, j As Long
+    Dim pivot As String
+    Dim tmp As TRow
+
+    i = lo
+    j = hi
+    pivot = rows((lo + hi) \ 2).SortKey
+
+    Do While i <= j
+        Do While rows(i).SortKey < pivot
+            i = i + 1
+        Loop
+        Do While rows(j).SortKey > pivot
+            j = j - 1
+        Loop
+
+        If i <= j Then
+            tmp = rows(i)
+            rows(i) = rows(j)
+            rows(j) = tmp
+            i = i + 1
+            j = j - 1
+        End If
+    Loop
+
+    If lo < j Then QuickSortRows rows, lo, j
+    If i < hi Then QuickSortRows rows, i, hi
+End Sub
+
+'==========================
+' Object name enumeration + sorting
+'==========================
+Private Function GetSortedAllObjectNames(ByVal objKind As AcObjectType) As String()
+    Dim tmp() As String
+    Dim n As Long: n = 0
+
+    Dim i As Long
+    Select Case objKind
+        Case acForm
+            If CurrentProject.AllForms.Count = 0 Then
+                ReDim tmp(0 To 0): tmp(0) = ""
+                GetSortedAllObjectNames = tmp
+                Exit Function
+            End If
+            ReDim tmp(1 To CurrentProject.AllForms.Count)
+            For i = 0 To CurrentProject.AllForms.Count - 1
+                n = n + 1
+                tmp(n) = CurrentProject.AllForms(i).Name
+            Next i
+
+        Case acReport
+            If CurrentProject.AllReports.Count = 0 Then
+                ReDim tmp(0 To 0): tmp(0) = ""
+                GetSortedAllObjectNames = tmp
+                Exit Function
+            End If
+            ReDim tmp(1 To CurrentProject.AllReports.Count)
+            For i = 0 To CurrentProject.AllReports.Count - 1
+                n = n + 1
+                tmp(n) = CurrentProject.AllReports(i).Name
+            Next i
+
+        Case Else
+            ReDim tmp(0 To 0): tmp(0) = ""
+            GetSortedAllObjectNames = tmp
+            Exit Function
+    End Select
+
+    If n > 1 Then SortStrings tmp, 1, n
+    GetSortedAllObjectNames = tmp
+End Function
+
+Private Sub SortStrings(ByRef arr() As String, ByVal lo As Long, ByVal hi As Long)
+    Dim i As Long, j As Long
+    Dim pivot As String, tmp As String
+
+    i = lo
+    j = hi
+    pivot = LCase$(arr((lo + hi) \ 2))
+
+    Do While i <= j
+        Do While LCase$(arr(i)) < pivot
+            i = i + 1
+        Loop
+        Do While LCase$(arr(j)) > pivot
+            j = j - 1
+        Loop
+        If i <= j Then
+            tmp = arr(i)
+            arr(i) = arr(j)
+            arr(j) = tmp
+            i = i + 1
+            j = j - 1
+        End If
+    Loop
+
+    If lo < j Then SortStrings arr, lo, j
+    If i < hi Then SortStrings arr, i, hi
+End Sub
+
+'==========================
+' Macro list export (names only)
+'==========================
+Private Sub ExportMacroNameList(ByVal filePath As String)
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Output As #f
+    Print #f, "MacroName"
+
+    Dim i As Long
+    For i = 0 To CurrentProject.AllMacros.Count - 1
+        Print #f, CsvEscape(CurrentProject.AllMacros(i).Name)
+    Next i
+
+    Close #f
+End Sub
+
+'==========================
+' Folder/path helpers
+'==========================
+Private Function GetDefaultOutDir() As String
+    GetDefaultOutDir = REPO_ROOT & "\" & DEFAULT_OUTDIR_REL
+End Function
+
+Private Sub EnsureFolder(ByVal folderPath As String)
+    ' Creates nested folders if needed.
+    If Len(folderPath) = 0 Then Exit Sub
+
+    Dim parts() As String
+    parts = Split(folderPath, "\")
+
+    Dim cur As String
+    Dim i As Long
+
+    cur = parts(0)
+    If InStr(cur, ":") > 0 Then
+        cur = cur & "\"
+        i = 1
+    Else
+        cur = ""
+        i = 0
+    End If
+
+    For i = i To UBound(parts)
+        If Len(parts(i)) > 0 Then
+            cur = cur & parts(i) & "\"
+            If Dir(cur, vbDirectory) = "" Then
+                MkDir cur
+            End If
+        End If
+    Next i
+End Sub
+
+Private Function IsFormLoaded(ByVal FormName As String) As Boolean
+    On Error GoTo EH
+    IsFormLoaded = CurrentProject.AllForms(FormName).IsLoaded
+    Exit Function
+EH:
+    IsFormLoaded = False
+End Function
+
+Private Function IsReportLoaded(ByVal reportName As String) As Boolean
+    On Error GoTo EH
+    IsReportLoaded = CurrentProject.AllReports(reportName).IsLoaded
+    Exit Function
+EH:
+    IsReportLoaded = False
+End Function

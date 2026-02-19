@@ -1,0 +1,1908 @@
+Option Compare Database
+Option Explicit
+
+Private Const DEBUG_CC_MISSING_Final As Boolean = True
+Private Const wdNoProtection As Long = -1
+
+'========================================================
+' Ensure document editable
+'========================================================
+Private Sub EnsureDocEditable(ByVal doc As Object)
+    On Error Resume Next
+    If doc.ProtectionType <> wdNoProtection Then
+        doc.Unprotect  ' if template uses a password, supply it here
+    End If
+End Sub
+
+'========================================================
+' Part WORD EXPORT (ISOLATED)
+'========================================================
+Public Function CreatePartInvoiceFiles_PartWord( _
+    ByVal InvoiceID As Long, _
+    ByVal docxPath As String, _
+    ByVal pdfPath As String) As Boolean
+
+    On Error GoTo ErrHandler
+    CreatePartInvoiceFiles_PartWord = False
+
+    Dim db As DAO.Database
+    Dim rsInv As DAO.Recordset
+    Dim sql As String
+
+    Dim wdApp As Object
+    Dim wdDoc As Object
+    Dim TemplatePath As String
+
+    Set db = CurrentDb
+
+    sql = "SELECT * FROM q_IssuedInvoiceDocument WHERE InvoiceID=" & InvoiceID
+    Set rsInv = db.OpenRecordset(sql, dbOpenSnapshot)
+    If rsInv.EOF Then
+        MsgBox "No invoice found in q_IssuedInvoiceDocument for InvoiceID " & InvoiceID, vbExclamation
+        GoTo CleanExit
+    End If
+
+    'If the NAME of the template changes, change the 'Part Invoice' string below to that name.
+    TemplatePath = DLookup("TemplatePath", "t_TemplateDocuments", "Description = 'Part Invoice'")
+
+    Set wdApp = CreateObject("Word.Application")
+    wdApp.Visible = True
+    Set wdDoc = wdApp.Documents.Add(Template:=TemplatePath, NewTemplate:=False, DocumentType:=0)
+
+    EnsureDocEditable wdDoc
+
+    ' Header + footer financials
+    Fill_ClientBlock_Part wdDoc, rsInv
+    Fill_InvoiceDetails_Part wdDoc, rsInv
+    Fill_TermsAndRefs_Part wdDoc, rsInv
+    Fill_DepositREF_Part wdDoc, InvoiceID
+    Fill_Financials_Part wdDoc, InvoiceID, rsInv
+    RemoveDiscountRowIfZero wdDoc, InvoiceID
+    Fill_PageFooter_Part wdDoc
+
+    ' Sections
+    FillSection_TestSpecimen_Part wdDoc, InvoiceID
+    FillSection_SupportingConstructions_Part wdDoc, InvoiceID
+    FillSection_AdditionalReports_Part wdDoc, InvoiceID
+    FillSection_Additionals_Part wdDoc, InvoiceID
+
+    wdDoc.SaveAs2 fileName:=docxPath, FileFormat:=16
+    wdDoc.ExportAsFixedFormat OutputFileName:=pdfPath, ExportFormat:=17
+
+    CreatePartInvoiceFiles_PartWord = True
+
+CleanExit:
+    On Error Resume Next
+    If Not rsInv Is Nothing Then rsInv.Close
+    Set rsInv = Nothing
+    Exit Function
+
+ErrHandler:
+    MsgBox "Final Word export failed: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume CleanExit
+End Function
+
+
+'========================
+' Header sections
+'========================
+Private Sub Fill_ClientBlock_Part(doc As Object, rsInv As DAO.Recordset)
+    SetCCTextIfExists doc, "Client", Nz(rsInv!Client, "")
+
+    Dim addr As String
+    addr = BuildAddressFromRecord(rsInv, _
+        "Address1Line1", "Address1Line2", "Address1Line3", _
+        "Address1Line4", "Address1Line5", "Address1Line6")
+
+    SetCCTextIfExists doc, "ClientAddress", addr
+End Sub
+
+Private Sub Fill_InvoiceDetails_Part(doc As Object, rsInv As DAO.Recordset)
+    With rsInv
+        SetCCTextIfExists doc, "InvoiceREF", Nz(.fields("InvoiceREF"), "")
+        SetCCTextIfExists doc, "ClientCode", Nz(.fields("ClientCode"), "")
+        SetCCTextIfExists doc, "QuoteNumber", Nz(.fields("QuoteNumber"), "")
+        SetCCTextIfExists doc, "VNumber", Nz(.fields("VNumber"), "")
+
+        Dim invDate As Variant
+        invDate = .fields("DateIssued")
+        If Not IsNull(invDate) Then
+            SetCCTextIfExists doc, "InvoiceDate", Format(invDate, "d-mmm-yy")
+        Else
+            SetCCTextIfExists doc, "InvoiceDate", Format(Date, "d-mmm-yy")
+        End If
+
+        SetCCTextIfExists doc, "PORef", Nz(.fields("PurchaseOrderRef"), "")
+    End With
+End Sub
+
+Private Sub Fill_PageFooter_Part(doc As Object)
+    On Error Resume Next
+    If Len(Nz(TempVars!TnCName, "")) > 0 Then
+        SetCCTextIfExistsAny doc, Nz(TempVars!TnCName, ""), "TnCDocument"
+    End If
+End Sub
+
+'========================
+' Terms / due date / credit ref
+'========================
+Private Sub Fill_TermsAndRefs_Part(doc As Object, rsInv As DAO.Recordset)
+
+    ' TERMS (CC: Terms)
+    Dim NoDays As Long
+    NoDays = Nz(rsInv!NoDays, 0)
+
+    Dim termsText As String
+    If NoDays > 0 Then
+        termsText = CStr(NoDays) & " days"
+    Else
+        termsText = ""
+    End If
+    SetCCTextIfExists doc, "Terms", termsText
+
+    ' DUE DATE (CC: DueDate)
+    Dim DueDate As Variant
+    DueDate = Null
+    If NoDays > 0 Then DueDate = DateAdd("d", NoDays, Date)
+
+    If Not IsNull(DueDate) Then
+        SetCCTextIfExistsAny doc, Format$(CDate(DueDate), "d-mmm-yy"), "DueDate", "Due Date"
+    Else
+        SetCCTextIfExistsAny doc, "", "DueDate", "Due Date"
+    End If
+
+'========================
+' CREDIT REF (CC: CreditREF) - delete row if unused or blank
+'========================
+Dim ccCredit As Object
+Set ccCredit = GetCCByTag(doc, "CreditREF")
+
+If Not ccCredit Is Nothing Then
+    UnlockCC ccCredit
+
+    'If no credit applied on this invoice, remove the row entirely
+    Dim CreditApplied As Currency
+    CreditApplied = Nz(RSValue(rsInv, "AppliedCredit", "Credit"), 0)
+
+    If CreditApplied <= 0 Then
+        DeleteRowContainingCC ccCredit
+    Else
+        'If credit is applied, write the ref; if still blank, remove row
+        Dim creditRefText As String
+        creditRefText = Nz(RSValue(rsInv, "CreditREF", "CreditRef"), "")
+
+        'Optional: if you do NOT store CreditREF on t_Invoices reliably, derive it:
+        If Len(Trim$(creditRefText)) = 0 Then
+            creditRefText = BuildCreditRefForInvoice(Nz(RSValue(rsInv, "InvoiceID"), 0))
+        End If
+
+        ccCredit.Range.text = creditRefText
+
+        If Len(CleanWordTableText(ccCredit.Range.text)) = 0 Then
+            DeleteRowContainingCC ccCredit
+        End If
+    End If
+End If
+
+End Sub
+
+Private Function BuildCreditRefForInvoice(ByVal InvoiceID As Long) As String
+    On Error GoTo CleanFail
+
+    Dim rs As DAO.Recordset
+    Dim sql As String
+    Dim refField As String
+    Dim tmp As String
+
+    BuildCreditRefForInvoice = ""
+    If InvoiceID <= 0 Then Exit Function
+
+    sql = "SELECT * FROM t_CreditNotes " & _
+          "WHERE UsedInvoiceID=" & InvoiceID & " AND Nz(UsedAmount,0) <> 0;"
+
+    Set rs = CurrentDb.OpenRecordset(sql, dbOpenSnapshot)
+    If rs.BOF And rs.EOF Then GoTo CleanExit
+
+    ' Decide which field holds the reference text
+    If RSHasField(rs, "CreditRef") Then
+        refField = "CreditRef"
+    ElseIf RSHasField(rs, "CreditREF") Then
+        refField = "CreditREF"
+    ElseIf RSHasField(rs, "CreditNoteRef") Then
+        refField = "CreditNoteRef"
+    Else
+        GoTo CleanExit
+    End If
+
+    Do While Not rs.EOF
+        tmp = Nz(rs.fields(refField).value, "")
+        If Len(tmp) > 0 Then
+            If Len(BuildCreditRefForInvoice) > 0 Then BuildCreditRefForInvoice = BuildCreditRefForInvoice & ", "
+            BuildCreditRefForInvoice = BuildCreditRefForInvoice & tmp
+        End If
+        rs.MoveNext
+    Loop
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Exit Function
+
+CleanFail:
+    Resume CleanExit
+End Function
+
+
+'========================================================
+' Resolve DepositPercent for PART invoices
+'   Authoritative source: t_Clients.DepositPercent
+'   Fallback: t_Invoices.DepositPercent (as stamped at invoice creation)
+'   Normalises 20 -> 0.2 if needed
+'========================================================
+Private Function ResolveDepositPercent_Part(ByVal InvoiceID As Long, Optional ByVal rsInv As DAO.Recordset) As Double
+    On Error GoTo SafeExit
+
+    Dim dp As Double
+    Dim ClientID As Long
+    Dim v As Variant
+
+    dp = 0
+    ClientID = 0
+
+    ' 1) Start with whatever is on the invoice recordset (if supplied)
+    If Not rsInv Is Nothing Then
+        dp = Nz(RSValue(rsInv, "DepositPercent"), 0)
+        ClientID = Nz(RSValue(rsInv, "ClientID", "ClientId"), 0)
+    End If
+
+    ' 2) If we still don't have ClientID, get it from the invoice row
+    If ClientID = 0 Then
+        ClientID = Nz(DLookup("ClientID", "t_Invoices", "InvoiceID=" & InvoiceID), 0)
+    End If
+
+    ' 3) Authoritative: Client deposit percent
+    If ClientID > 0 Then
+        v = DLookup("DepositPercent", "t_Clients", "ClientID=" & ClientID)
+        If Not IsNull(v) Then
+            dp = Nz(v, dp)
+        End If
+    End If
+
+    ' 4) Final fallback: invoice-stamped deposit percent (if client lookup failed)
+    If dp = 0 Then
+        v = DLookup("DepositPercent", "t_Invoices", "InvoiceID=" & InvoiceID)
+        If Not IsNull(v) Then dp = Nz(v, dp)
+    End If
+
+    ' 5) Normalise and clamp
+    If dp > 1 Then dp = dp / 100       ' handles 20 meaning 20%
+    If dp < 0 Then dp = 0
+    If dp > 1 Then dp = 1
+
+    ResolveDepositPercent_Part = dp
+    Exit Function
+
+SafeExit:
+    ResolveDepositPercent_Part = 0
+End Function
+
+'========================
+' Financials (Final rules)
+'========================
+Private Sub Fill_Financials_Part(doc As Object, ByVal InvoiceID As Long, rsInv As DAO.Recordset)
+    On Error GoTo Fail
+
+    Dim Discount As Double
+    Dim DepositPercent As Double
+    Dim VATRate As Double
+    Dim CreditAvailable As Currency
+
+    Dim GrossFee As Currency
+    Dim LessDiscount As Currency
+    Dim LessDeposit As Currency
+    Dim CreditToApply As Currency
+    Dim BalanceAfterCredit As Currency
+    Dim VATAmount As Currency
+    Dim totalPayable As Currency
+
+    Discount = Nz(rsInv!Discount, 0)
+    VATRate = Nz(rsInv!VAT, 0)
+
+    ' AUTHORITATIVE: client deposit percent (not t_Orders)
+    DepositPercent = ResolveDepositPercent_Part(InvoiceID, rsInv)
+
+    CreditAvailable = Nz(RSValue(rsInv, "Credit", "AppliedCredit"), 0)
+
+    ' GrossFee must be pre-discount / pre-deposit / pre-credit.
+    ' PART invoices compute from INVOICE-scoped line items.
+    GrossFee = ComputeSpecimenGross_Part(InvoiceID) _
+             + ComputeSupportingConstructionsGross_Part(InvoiceID) _
+             + ComputeReportSummaryTotal(InvoiceID) _
+             + ComputeAdditionalsTotal(InvoiceID)
+
+    ' Discount does NOT apply to Reports or Additionals (Part invoices: no reports; additionals are non-discountable)
+    Dim nonDiscountableGross As Currency
+    nonDiscountableGross = ComputeAdditionalsTotal(InvoiceID)
+
+    Dim DiscountableBase As Currency
+    DiscountableBase = GrossFee - nonDiscountableGross
+    If DiscountableBase < 0 Then DiscountableBase = 0
+
+    Dim discountAmount As Currency
+    discountAmount = Round(DiscountableBase * Discount, 2)
+
+    LessDiscount = Round(GrossFee - discountAmount, 2)
+
+    ' Part invoice: amount due now is the REMAINING portion after deposit has been accounted for
+    ' (i.e. LessDiscount * (1 - DepositPercent))
+    Dim depFactor As Double
+    depFactor = 1 - DepositPercent
+    LessDeposit = Round(LessDiscount * depFactor, 2)
+
+    ' Apply any available credit to the amount due now
+    CreditToApply = CreditAvailable
+    If CreditToApply > LessDeposit Then CreditToApply = LessDeposit
+    If CreditToApply < 0 Then CreditToApply = 0
+
+    BalanceAfterCredit = Round(LessDeposit - CreditToApply, 2)
+    VATAmount = Round(BalanceAfterCredit * VATRate, 2)
+    totalPayable = Round(BalanceAfterCredit + VATAmount, 2)
+
+    PersistInvoicePayableTotals_Part InvoiceID, BalanceAfterCredit, VATAmount, totalPayable
+
+    ' Keep DB InvoiceIncVAT aligned with the document Total (email uses this)
+    On Error Resume Next
+    CurrentDb.Execute _
+        "UPDATE t_Invoices SET InvoiceIncVAT = " & CCur(totalPayable) & _
+        " WHERE InvoiceID = " & InvoiceID & ";", _
+        dbFailOnError
+    On Error GoTo 0
+
+    SetCCTextIfExistsAny doc, FormatCurrency(GrossFee, 2), "GrossFee", "Gross Fee", "Initial Fee"
+    SetCCTextIfExistsAny doc, FormatCurrency(LessDiscount, 2), "LessDiscount", "Less Discount"
+    SetCCTextIfExistsAny doc, FormatCurrency(LessDeposit, 2), "LessDeposit", "LessDeposit", "Less Deposit"
+    SetCCTextIfExistsAny doc, FormatCurrency(VATAmount, 2), "VATAmount", "VAT Amount"
+    SetCCTextIfExistsAny doc, FormatCurrency(totalPayable, 2), "Total", "Total Payable"
+
+    ' Credit row handling
+    If CreditToApply > 0 Then
+        SetCCTextIfExistsAny doc, FormatCurrency(BalanceAfterCredit, 2), "LessCredit", "Less Credit"
+    Else
+        Dim ccLessCredit As Object
+        Set ccLessCredit = GetCCByTag(doc, "LessCredit")
+        If Not ccLessCredit Is Nothing Then DeleteRowContainingCC ccLessCredit
+    End If
+
+    ' Tokens: XXX discount, YYY deposit %, ZZZ credit, VVV VAT
+    ReplaceFinancialFooterTokens_Part doc, Discount, DepositPercent, CreditToApply, VATRate
+    Exit Sub
+
+Fail:
+    MsgBox "Part financials failed: " & Err.Number & " - " & Err.Description, vbCritical
+End Sub
+
+
+'========================
+' Specimen table
+'========================
+Private Sub FillSection_TestSpecimen_Part(doc As Object, ByVal InvoiceID As Long)
+    On Error GoTo Fail
+
+    Dim rs As DAO.Recordset
+    Dim secCC As Object
+    Dim tbl As Object
+    Dim templateRow As Object, newRow As Object
+    Dim templateFmt As Object
+    Dim sql As String
+    Dim templateIndex As Long, headerRows As Long
+    Dim hasDiscount As Boolean
+    Dim firstRow As Boolean
+    Dim r As Long
+
+    Set secCC = GetCCByTag(doc, "Section_TestSpecimen")
+    If secCC Is Nothing Then Exit Sub
+    UnlockCC secCC
+
+    Dim qd As DAO.QueryDef
+    Set qd = CurrentDb.QueryDefs("q_PartInvoiceSpecimen")
+    qd.Parameters("InvoiceID").value = InvoiceID
+    Set rs = qd.OpenRecordset(dbOpenSnapshot)
+
+    If rs.EOF Then
+        secCC.Range.Delete
+        GoTo CleanExit
+    End If
+
+    If secCC.Range.Tables.Count = 0 Then GoTo CleanExit
+    Set tbl = secCC.Range.Tables(1)
+    If tbl.rows.Count < 2 Then GoTo CleanExit
+
+    ' Find template row + keep headers
+    templateIndex = FindTemplateRowIndex(tbl)
+    headerRows = templateIndex - 1
+    If headerRows < 1 Then headerRows = 1
+
+    ' Delete any existing data rows below the template row
+    For r = tbl.rows.Count To (templateIndex + 1) Step -1
+        tbl.rows(r).Delete
+    Next r
+
+    Set templateRow = tbl.rows(templateIndex)
+
+    ' Snapshot formatting BEFORE writing any data
+    Set templateFmt = templateRow.Range.Duplicate
+
+    ' Clean template row so first printed row is clean/editable
+    RemoveAllContentControlsInRange templateRow.Range
+    ClearWordRowCells templateRow
+
+    firstRow = True
+    hasDiscount = False
+
+    rs.MoveFirst
+    Do While Not rs.EOF
+
+        Dim Dept As String, stdNo As String, specNo As String, sampType As String
+        Dim fee As Currency, disc As Double, dep As Double, depTotal As Currency
+
+        Dept = Nz(RSValue(rs, "Department"), "")
+        stdNo = Nz(RSValue(rs, "stdNumber", "StdNumber"), "")
+        specNo = Nz(RSValue(rs, "SpecimenNumber"), "")
+        sampType = Nz(RSValue(rs, "SampleTypeName", "SampleType"), "")
+
+        fee = Nz(RSValue(rs, "TestPrice"), 0)
+        disc = Nz(RSValue(rs, "Discount"), 0)
+        dep = Nz(RSValue(rs, "DepositPercent"), 0)
+
+        Dim remaining As Currency
+        remaining = Nz(RSValue(rs, "Remaining"), 0)
+        
+        Dim depPct As Double, depFactor As Double
+        depPct = Nz(RSValue(rs, "DepositPercent"), 0)
+        depFactor = 1 - depPct
+
+        If firstRow Then
+            Set newRow = templateRow
+            firstRow = False
+        Else
+            Set newRow = tbl.rows.Add
+            newRow.Range.FormattedText = templateFmt.FormattedText
+            RemoveAllContentControlsInRange newRow.Range
+            ClearWordRowCells newRow
+        End If
+
+        newRow.Cells(1).Range.text = Dept
+        newRow.Cells(2).Range.text = stdNo
+        newRow.Cells(3).Range.text = specNo
+        newRow.Cells(4).Range.text = sampType
+        newRow.Cells(5).Range.text = FormatCurrency(fee, 2)
+
+        If disc <> 0 Then hasDiscount = True
+        newRow.Cells(6).Range.text = IIf(disc = 0, vbNullString, FormatPercent(disc, 1))
+
+        newRow.Cells(7).Range.text = IIf(depPct = 0, vbNullString, FormatPercent(depPct, 1))
+        newRow.Cells(8).Range.text = "1"
+        newRow.Cells(9).Range.text = FormatCurrency(remaining, 2)
+
+        rs.MoveNext
+    Loop
+
+    ' Ensure header text exists (Word sometimes loses it when CCs are removed)
+    EnsureHeaderRowText tbl, "Dept.", "Test Standard", "Sample Number", "Sample Type", "Fee", "Disc.", "Deposit", "Qty.", "Total"
+
+    If Not hasDiscount Then
+        ClearDiscountHeaderIfNoDiscount tbl, headerRows
+    End If
+
+    DeduplicateWordTableRows tbl, headerRows, 1, 2, 3, 4
+    RemovePlaceholderRows tbl
+    RemoveBlankRowsKeepHeaders tbl, headerRows
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Exit Sub
+
+Fail:
+    MsgBox "Part specimen section failed: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume CleanExit
+End Sub
+
+'=====================================
+' Supporting Constructions (preserve headers)
+'=====================================
+Private Sub FillSection_SupportingConstructions_Part(doc As Object, ByVal InvoiceID As Long)
+    On Error GoTo Fail
+
+    Dim secCC As Object
+    Dim rs As DAO.Recordset
+    Dim sql As String
+    Dim ordID As Long
+    Dim tbl As Object, templateRow As Object, newRow As Object
+    Dim firstRow As Boolean
+    Dim hasDiscount As Boolean
+    Dim templateIndex As Long, headerRows As Long
+
+    Set secCC = GetCCByTag(doc, "Section_SupportingConstructions")
+    Dim qd As DAO.QueryDef
+    Set qd = CurrentDb.QueryDefs("q_PartInvoiceSCCount")
+    qd.Parameters("InvoiceID").value = InvoiceID
+    Set rs = qd.OpenRecordset(dbOpenSnapshot)
+
+    If rs.EOF Then
+        RemoveSectionTableAndHeading doc, "Section_SupportingConstructions"
+        GoTo CleanExit
+    End If
+
+    If secCC Is Nothing Then GoTo CleanExit
+    UnlockCC secCC
+
+    If secCC.Range.Tables.Count = 0 Then GoTo CleanExit
+    Set tbl = secCC.Range.Tables(1)
+    If tbl.rows.Count < 2 Then GoTo CleanExit
+
+    templateIndex = FindTemplateRowIndex(tbl)
+    headerRows = templateIndex - 1
+    If headerRows < 1 Then headerRows = 1
+
+    Dim r As Long
+    For r = tbl.rows.Count To (templateIndex + 1) Step -1
+        tbl.rows(r).Delete
+    Next r
+
+    Set templateRow = tbl.rows(templateIndex)
+    RemoveAllContentControlsInRange templateRow.Range
+
+    firstRow = True
+    hasDiscount = False
+
+    rs.MoveFirst
+    Do While Not rs.EOF
+
+        If firstRow Then
+            Set newRow = templateRow
+            firstRow = False
+        Else
+            Set newRow = tbl.rows.Add
+            newRow.Range.FormattedText = templateRow.Range.FormattedText
+            RemoveAllContentControlsInRange newRow.Range
+        End If
+
+        newRow.Cells(1).Range.text = Nz(rs!SC_Department, "")
+        newRow.Cells(2).Range.text = Nz(rs!SC_Standards, "")
+        newRow.Cells(3).Range.text = Nz(rs!SC_SampNum, "")
+        newRow.Cells(4).Range.text = Nz(rs!SC_Type, "")
+        newRow.Cells(5).Range.text = FormatCurrency(Nz(rs!SC_Fee, 0), 2)
+
+        Dim scDisc As Double
+        Dim depPct As Double
+        Dim depFactor As Double
+        Dim dueNow As Currency
+        
+        scDisc = Nz(rs!SC_Discount, 0)
+        depPct = Nz(rs!SC_Deposit, 0)
+        depFactor = 1 - depPct
+        
+        If scDisc <> 0 Then hasDiscount = True
+        
+        newRow.Cells(6).Range.text = IIf(scDisc = 0, vbNullString, FormatPercent(scDisc, 1))
+        
+        ' Deposit column: keep showing the deposit percent (matches your Final Invoice Notes).
+        ' If you *want* to show the remaining percent instead, swap depPct -> depFactor here.
+        newRow.Cells(7).Range.text = IIf(depPct = 0, vbNullString, FormatPercent(depPct, 1))
+        
+        newRow.Cells(8).Range.text = CStr(Nz(rs!SC_TestQty, 0))
+        
+        dueNow = Round(Nz(rs!SC_Fee, 0) * (1 - scDisc) * depFactor, 2)
+        newRow.Cells(9).Range.text = FormatCurrency(dueNow, 2)
+
+        rs.MoveNext
+    Loop
+
+    EnsureHeaderRowText tbl, "Dept.", "Test Standard", "Sample Number", "Sample Type", "Fee", "Disc.", "Deposit", "Qty.", "Total"
+    
+    If Not hasDiscount Then
+        ClearDiscountHeaderIfNoDiscount tbl, headerRows
+    End If
+
+    RemovePlaceholderRows tbl
+    RemoveBlankRowsKeepHeaders tbl, headerRows
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Exit Sub
+
+Fail:
+    MsgBox "Final supporting constructions failed: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume CleanExit
+End Sub
+
+'=====================================
+' Additional Reports (line-by-line, no discount)
+'=====================================
+Private Sub FillSection_AdditionalReports_Part(doc As Object, ByVal InvoiceID As Long)
+    ' Part invoices currently do not include reports.
+    ' Requirement: remove the entire Additional Reports section (heading + table).
+    On Error Resume Next
+    RemoveSectionTableAndHeading doc, "Section_AdditionalReports"
+End Sub
+
+
+'=====================================
+' Additionals (summary line)
+'=====================================
+Private Sub FillSection_Additionals_Part(doc As Object, ByVal InvoiceID As Long)
+    On Error GoTo CleanFail
+
+    Dim secCC As Object, tbl As Object
+    Dim dp As Double
+
+    Set secCC = GetCCByTag(doc, "Section_Additionals")
+    If secCC Is Nothing Then Exit Sub
+    UnlockCC secCC
+
+    If secCC.Range.Tables.Count = 0 Then
+        RemoveSectionTableAndHeading doc, "Section_Additionals"
+        Exit Sub
+    End If
+
+    Set tbl = secCC.Range.Tables(1)
+    If tbl.rows.Count < 2 Then
+        RemoveSectionTableAndHeading doc, "Section_Additionals"
+        Exit Sub
+    End If
+
+    ' For Part invoices, "Deposit" column represents the portion already paid (i.e. client deposit %)
+    dp = Nz(DLookup("DepositPercent", "q_IssuedInvoiceDocument", "InvoiceID=" & InvoiceID), 0)
+
+    Dim qd As DAO.QueryDef
+    Dim rs As DAO.Recordset
+    Set qd = CurrentDb.QueryDefs("q_PartInvoiceAdditionals")
+    qd.Parameters("InvoiceID").value = InvoiceID
+    Set rs = qd.OpenRecordset(dbOpenSnapshot)
+
+    If rs.EOF Then
+        RemoveSectionTableAndHeading doc, "Section_Additionals"
+        GoTo CleanExit
+    End If
+
+    Dim templateIndex As Long, headerRows As Long, r As Long
+    Dim templateRow As Object, newRow As Object
+    Dim templateFmt As Object
+    Dim colCount As Long
+    Dim firstRow As Boolean
+    Dim wroteAny As Boolean
+
+    colCount = tbl.Columns.Count
+
+    templateIndex = FindTemplateRowIndex(tbl)
+    headerRows = templateIndex - 1
+    If headerRows < 1 Then headerRows = 1
+
+    ' Delete any existing data rows below the template row
+    For r = tbl.rows.Count To (templateIndex + 1) Step -1
+        tbl.rows(r).Delete
+    Next r
+
+    Set templateRow = tbl.rows(templateIndex)
+    Set templateFmt = templateRow.Range.Duplicate
+
+    RemoveAllContentControlsInRange templateRow.Range
+    ClearWordRowCells templateRow
+
+    firstRow = True
+    wroteAny = False
+
+    rs.MoveFirst
+    Do While Not rs.EOF
+
+        Dim QtyTC As Double, feeTC As Currency
+        Dim QtyAlt As Double, feeAlt As Currency
+        Dim sampNum As String
+        Dim lineTotal As Currency
+        Dim TestID As Long
+
+        sampNum = Nz(RSValue(rs, "Add_SampNum", "SpecimenNumber"), "")
+        TestID = CLng(Nz(RSValue(rs, "TestID"), 0))
+
+        '---------------------------
+        ' 1) Additional Thermocouples
+        '---------------------------
+        QtyTC = Nz(RSValue(rs, "Add_Qty", "AdditionalTCs"), 0)
+        feeTC = CCur(Nz(RSValue(rs, "Add_Fee", "TCPrice", "AdditionalTCs"), 0))
+
+        If QtyTC > 0 And feeTC <> 0 Then
+
+            lineTotal = CCur(QtyTC * feeTC * (1 - dp))
+
+            If firstRow Then
+                Set newRow = templateRow
+                firstRow = False
+            Else
+                Set newRow = tbl.rows.Add
+                newRow.Range.FormattedText = templateFmt.FormattedText
+                RemoveAllContentControlsInRange newRow.Range
+                ClearWordRowCells newRow
+            End If
+
+            If colCount >= 7 Then
+                newRow.Cells(1).Range.text = "Additional thermocouples"
+                newRow.Cells(2).Range.text = sampNum
+                newRow.Cells(3).Range.text = FormatCurrency(feeTC, 2)
+                newRow.Cells(5).Range.text = IIf(dp = 0, vbNullString, FormatPercent(dp, 1))
+                newRow.Cells(6).Range.text = CStr(QtyTC)
+                newRow.Cells(7).Range.text = FormatCurrency(lineTotal, 2)
+            Else
+                newRow.Cells(1).Range.text = "Additional thermocouples"
+                newRow.Cells(2).Range.text = sampNum
+                newRow.Cells(3).Range.text = FormatCurrency(feeTC, 2)
+                newRow.Cells(4).Range.text = IIf(dp = 0, vbNullString, FormatPercent(dp, 1))
+                newRow.Cells(5).Range.text = CStr(QtyTC)
+                newRow.Cells(6).Range.text = FormatCurrency(lineTotal, 2)
+            End If
+
+            wroteAny = True
+        End If
+
+        '---------------------------
+        ' 2) Additional Tests (NumAlts)
+        '---------------------------
+        QtyAlt = Nz(RSValue(rs, "Alt_Qty", "NumAlts"), 0)
+        feeAlt = 0
+
+        If QtyAlt > 0 And TestID <> 0 Then
+            feeAlt = CCur(Nz(DLookup("[AdditionalTests]", "t_AccreditedTests", "TestID=" & TestID), 0))
+        End If
+
+        If QtyAlt > 0 And feeAlt <> 0 Then
+
+            lineTotal = CCur(QtyAlt * feeAlt * (1 - dp))
+
+            If firstRow Then
+                Set newRow = templateRow
+                firstRow = False
+            Else
+                Set newRow = tbl.rows.Add
+                newRow.Range.FormattedText = templateFmt.FormattedText
+                RemoveAllContentControlsInRange newRow.Range
+                ClearWordRowCells newRow
+            End If
+
+            If colCount >= 7 Then
+                newRow.Cells(1).Range.text = "Additional tests"
+                newRow.Cells(2).Range.text = sampNum
+                newRow.Cells(3).Range.text = FormatCurrency(feeAlt, 2)
+                newRow.Cells(5).Range.text = IIf(dp = 0, vbNullString, FormatPercent(dp, 1))
+                newRow.Cells(6).Range.text = CStr(QtyAlt)
+                newRow.Cells(7).Range.text = FormatCurrency(lineTotal, 2)
+            Else
+                newRow.Cells(1).Range.text = "Additional tests"
+                newRow.Cells(2).Range.text = sampNum
+                newRow.Cells(3).Range.text = FormatCurrency(feeAlt, 2)
+                newRow.Cells(4).Range.text = IIf(dp = 0, vbNullString, FormatPercent(dp, 1))
+                newRow.Cells(5).Range.text = CStr(QtyAlt)
+                newRow.Cells(6).Range.text = FormatCurrency(lineTotal, 2)
+            End If
+
+            wroteAny = True
+        End If
+
+        rs.MoveNext
+    Loop
+
+    If Not wroteAny Then
+        RemoveSectionTableAndHeading doc, "Section_Additionals"
+        GoTo CleanExit
+    End If
+
+    If colCount >= 7 Then
+        EnsureHeaderRowText tbl, "Type", "Sample Number", "Fee", "", "Deposit", "Qty.", "Total"
+    Else
+        EnsureHeaderRowText tbl, "Type", "Sample Number", "Fee", "Deposit", "Qty.", "Total"
+    End If
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set qd = Nothing
+    Exit Sub
+
+CleanFail:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set qd = Nothing
+    Debug.Print "FillSection_Additionals_Part failed: " & Err.Number & " - " & Err.Description
+End Sub
+
+
+Private Sub EnsureAdditionalsHeader(ByVal tbl As Object)
+    'Expected columns:
+    ' 1 Type | 2 Sample Number | 3 Fee | 4 (blank) | 5 Deposit | 6 Qty. | 7 Total
+
+    If tbl Is Nothing Then Exit Sub
+    If tbl.rows.Count < 1 Then Exit Sub
+    If tbl.Columns.Count < 7 Then Exit Sub
+
+    SetCellText tbl.cell(1, 1), "Type"
+    SetCellText tbl.cell(1, 2), "Sample Number"
+    SetCellText tbl.cell(1, 3), "Fee"
+    SetCellText tbl.cell(1, 4), ""          'blank spacer column
+    SetCellText tbl.cell(1, 5), "Deposit"
+    SetCellText tbl.cell(1, 6), "Qty."
+    SetCellText tbl.cell(1, 7), "Total"
+
+    'Make header bold (optional but normally expected)
+    On Error Resume Next
+    tbl.rows(1).Range.Font.Bold = True
+    On Error GoTo 0
+End Sub
+
+Private Sub SetCellText(ByVal cell As Object, ByVal text As String)
+    On Error Resume Next
+    Dim r As Object
+    Set r = cell.Range
+    r.text = text
+    On Error GoTo 0
+End Sub
+
+
+
+'========================
+' Calculators
+'========================
+Private Function ComputeReportSummaryTotal(ByVal InvoiceID As Long) As Currency
+    ' Part invoices do not include reports.
+    ComputeReportSummaryTotal = 0
+End Function
+
+Private Function ComputeReportSummaryQty(ByVal InvoiceID As Long) As Double
+    Dim qid As Long
+    qid = GetQuoteIDForInvoice(InvoiceID)
+    If qid = 0 Then Exit Function
+
+    Dim techQ As Double, classQ As Double, exapQ As Double, SFClassQ As Double
+    techQ = Nz(DLookup("AddReports", "t_Quotations", "QuoteID=" & qid), 0)
+    classQ = Nz(DLookup("ClassReports", "t_Quotations", "QuoteID=" & qid), 0)
+    exapQ = Nz(DLookup("EXAPReports", "t_Quotations", "QuoteID=" & qid), 0)
+    SFClassQ = Nz(DLookup("ShortClassReports", "t_Quotations", "QuoteID=" & qid), 0)
+
+    ComputeReportSummaryQty = techQ + classQ + exapQ + SFClassQ
+End Function
+
+Private Function ComputeAdditionalsTotal(ByVal InvoiceID As Long) As Currency
+    ' Part invoices: specimen-specific additionals only (no waste).
+    On Error GoTo CleanExit
+
+    Dim qd As DAO.QueryDef
+    Dim rs As DAO.Recordset
+    Dim totalGross As Currency
+
+    Set qd = CurrentDb.QueryDefs("q_PartInvoiceAdditionals")
+    qd.Parameters("InvoiceID").value = InvoiceID
+    Set rs = qd.OpenRecordset(dbOpenSnapshot)
+
+    Do While Not rs.EOF
+
+        Dim tcQty As Double, tcFee As Currency
+        Dim altQty As Double, altFee As Currency
+        Dim TestID As Long
+
+        tcQty = Nz(RSValue(rs, "Add_Qty", "AdditionalTCs"), 0)
+        tcFee = CCur(Nz(RSValue(rs, "Add_Fee", "TCPrice"), 0))
+        totalGross = totalGross + (tcQty * tcFee)
+
+        altQty = Nz(RSValue(rs, "Alt_Qty", "NumAlts"), 0)
+        TestID = CLng(Nz(RSValue(rs, "TestID"), 0))
+        altFee = 0
+
+        If altQty > 0 And TestID <> 0 Then
+            altFee = CCur(Nz(DLookup("[AdditionalTests]", "t_AccreditedTests", "TestID=" & TestID), 0))
+            totalGross = totalGross + (altQty * altFee)
+        End If
+
+        rs.MoveNext
+    Loop
+
+    ComputeAdditionalsTotal = totalGross
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set qd = Nothing
+End Function
+
+
+Private Function ComputeAdditionalsQty(ByVal InvoiceID As Long) As Double
+    Dim qid As Long
+    qid = GetQuoteIDForInvoice(InvoiceID)
+    If qid = 0 Then Exit Function
+
+    Dim rs As DAO.Recordset
+    Dim sql As String
+    sql = "SELECT AdditionalTCs FROM q_Additionals WHERE QuoteID=" & qid
+    Set rs = CurrentDb.OpenRecordset(sql, dbOpenSnapshot)
+
+    Dim Qty As Double
+    Do While Not rs.EOF
+        Qty = Qty + Nz(rs!AdditionalTCs, 0)
+        rs.MoveNext
+    Loop
+
+    rs.Close
+    Set rs = Nothing
+
+    ComputeAdditionalsQty = Qty
+End Function
+
+Private Function ComputeSpecimenGross_Part(ByVal InvoiceID As Long) As Currency
+    On Error GoTo SafeExit
+    If InvoiceID = 0 Then Exit Function
+
+    Dim qd As DAO.QueryDef
+    Dim rs As DAO.Recordset
+    Set qd = CurrentDb.QueryDefs("q_PartInvoiceSpecimen")
+    qd.Parameters("InvoiceID").value = InvoiceID
+    Set rs = qd.OpenRecordset(dbOpenSnapshot)
+
+    Dim Total As Currency
+    Do While Not rs.EOF
+        Total = Total + CCur(Nz(RSValue(rs, "TestPrice"), 0))
+        rs.MoveNext
+    Loop
+
+    ComputeSpecimenGross_Part = Total
+
+SafeExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set qd = Nothing
+End Function
+
+
+Private Function ComputeSupportingConstructionsGross_Part(ByVal InvoiceID As Long) As Currency
+    On Error GoTo SafeExit
+    If InvoiceID = 0 Then Exit Function
+
+    Dim qd As DAO.QueryDef
+    Dim rs As DAO.Recordset
+    Set qd = CurrentDb.QueryDefs("q_PartInvoiceSCCount")
+    qd.Parameters("InvoiceID").value = InvoiceID
+    Set rs = qd.OpenRecordset(dbOpenSnapshot)
+
+    Dim Total As Currency
+    Do While Not rs.EOF
+        Total = Total + CCur(Nz(RSValue(rs, "SC_Fee", "SCPrice"), 0))
+        rs.MoveNext
+    Loop
+
+    ComputeSupportingConstructionsGross_Part = Total
+
+SafeExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set qd = Nothing
+End Function
+
+
+'========================
+' Local helpers
+'========================
+' Apply formatting from a template row-range onto a newly added row.
+' Uses PasteSpecial(wdPasteFormats) to avoid copying placeholder text.
+Private Sub ApplyFormatToRow(ByVal targetRow As Object, ByVal templateFmt As Object)
+    On Error GoTo SafeExit
+
+    Const wdPasteFormats As Long = 16
+
+    If templateFmt Is Nothing Then GoTo SafeExit
+    If targetRow Is Nothing Then GoTo SafeExit
+
+    ' Copy only formatting
+    templateFmt.Copy
+    targetRow.Range.PasteSpecial DataType:=wdPasteFormats
+
+SafeExit:
+    ' swallow errors: formatting is non-critical
+End Sub
+
+Private Function BuildAddressFromRecord(rs As DAO.Recordset, ParamArray fieldNames() As Variant) As String
+    Dim i As Long
+    Dim result As String
+
+    For i = LBound(fieldNames) To UBound(fieldNames)
+        If RSHasField(rs, CStr(fieldNames(i))) Then
+            Dim v As Variant
+            v = rs.fields(CStr(fieldNames(i))).value
+            If Not IsNull(v) Then
+                If Len(Trim$(CStr(v))) > 0 Then
+                    If Len(result) > 0 Then result = result & vbCrLf
+                    result = result & CStr(v)
+                End If
+            End If
+        End If
+    Next i
+
+    BuildAddressFromRecord = result
+End Function
+
+Private Function GetOrderIDForInvoice(ByVal InvoiceID As Long) As Long
+    GetOrderIDForInvoice = modInvoice_Common.GetOrderIDForInvoice(InvoiceID)
+End Function
+
+Private Function GetQuoteIDForInvoice(ByVal InvoiceID As Long) As Long
+    GetQuoteIDForInvoice = modInvoice_Common.GetQuoteIDForInvoice(InvoiceID)
+End Function
+
+Private Function RSHasField(rs As DAO.Recordset, fieldName As String) As Boolean
+    On Error GoTo ErrHandler
+    Dim fld As DAO.Field
+    For Each fld In rs.fields
+        If StrComp(fld.Name, fieldName, vbTextCompare) = 0 Then
+            RSHasField = True
+            Exit Function
+        End If
+    Next fld
+    RSHasField = False
+    Exit Function
+ErrHandler:
+    RSHasField = False
+End Function
+
+Private Function RSValue(ByVal rs As DAO.Recordset, ParamArray names() As Variant) As Variant
+    Dim i As Long
+    For i = LBound(names) To UBound(names)
+        If RSHasField(rs, CStr(names(i))) Then
+            RSValue = rs.fields(CStr(names(i))).value
+            Exit Function
+        End If
+    Next i
+    RSValue = Null
+End Function
+
+Private Sub UnlockCC(cc As Object)
+    On Error Resume Next
+    cc.LockContentControl = False
+    cc.LockContents = False
+End Sub
+
+Private Sub SetCCTextIfExists(doc As Object, ByVal tagName As String, ByVal valueText As String)
+    Dim cc As Object
+    Set cc = GetCCByTag(doc, tagName)
+
+    If cc Is Nothing Then
+        If DEBUG_CC_MISSING_Final Then Debug.Print "Missing CC tag/title: " & tagName
+        Exit Sub
+    End If
+
+    UnlockCC cc
+    cc.Range.text = valueText
+End Sub
+
+Private Sub SetCCTextIfExistsAny(doc As Object, ByVal valueText As String, ParamArray names() As Variant)
+    Dim i As Long, nm As String
+    Dim cc As Object
+
+    For i = LBound(names) To UBound(names)
+        nm = CStr(names(i))
+        Set cc = GetCCByTag(doc, nm)
+        If Not cc Is Nothing Then
+            UnlockCC cc
+            cc.Range.text = valueText
+            Exit Sub
+        End If
+    Next i
+
+    If DEBUG_CC_MISSING_Final Then Debug.Print "Missing CC tag/title: " & CStr(names(LBound(names)))
+End Sub
+
+'========================================================
+' GetCCByTag: body + header/footer + text boxes (shapes)
+'========================================================
+Private Function GetCCByTag(doc As Object, ByVal tagName As String) As Object
+    On Error Resume Next
+
+    Dim want As String: want = LCase$(tagName)
+    Dim cc As Object
+
+    For Each cc In doc.ContentControls
+        If LCase$(Nz(cc.Tag, "")) = want Or LCase$(Nz(cc.Title, "")) = want Then
+            Set GetCCByTag = cc
+            Exit Function
+        End If
+    Next cc
+
+    Set cc = FindCCInShapes(doc.shapes, want)
+    If Not cc Is Nothing Then
+        Set GetCCByTag = cc
+        Exit Function
+    End If
+
+    Dim sec As Object, hf As Object, idx As Long
+    For Each sec In doc.Sections
+        For idx = 1 To 3
+            Set hf = sec.headers(idx)
+            If Not hf Is Nothing Then
+                For Each cc In hf.Range.ContentControls
+                    If LCase$(Nz(cc.Tag, "")) = want Or LCase$(Nz(cc.Title, "")) = want Then
+                        Set GetCCByTag = cc
+                        Exit Function
+                    End If
+                Next cc
+
+                Set cc = FindCCInShapes(hf.shapes, want)
+                If Not cc Is Nothing Then
+                    Set GetCCByTag = cc
+                    Exit Function
+                End If
+            End If
+
+            Set hf = sec.Footers(idx)
+            If Not hf Is Nothing Then
+                For Each cc In hf.Range.ContentControls
+                    If LCase$(Nz(cc.Tag, "")) = want Or LCase$(Nz(cc.Title, "")) = want Then
+                        Set GetCCByTag = cc
+                        Exit Function
+                    End If
+                Next cc
+
+                Set cc = FindCCInShapes(hf.shapes, want)
+                If Not cc Is Nothing Then
+                    Set GetCCByTag = cc
+                    Exit Function
+                End If
+            End If
+        Next idx
+    Next sec
+
+    Set GetCCByTag = Nothing
+End Function
+
+Private Function FindCCInShapes(ByVal shapes As Object, ByVal wantLower As String) As Object
+    On Error Resume Next
+    Dim shp As Object, cc As Object
+
+    If shapes Is Nothing Then Exit Function
+
+    For Each shp In shapes
+        If shp.TextFrame.HasText Then
+            For Each cc In shp.TextFrame.TextRange.ContentControls
+                If LCase$(Nz(cc.Tag, "")) = wantLower Or LCase$(Nz(cc.Title, "")) = wantLower Then
+                    Set FindCCInShapes = cc
+                    Exit Function
+                End If
+            Next cc
+        End If
+    Next shp
+End Function
+
+'========================
+' Word table helpers
+'========================
+Private Function CleanWordTableText(ByVal s As String) As String
+    s = Replace(s, Chr$(13), "")
+    s = Replace(s, Chr$(7), "")
+    s = Replace(s, Chr$(160), "")
+    s = Replace(s, vbTab, "")
+    CleanWordTableText = Trim$(s)
+End Function
+
+Private Sub ClearWordTableRow(ByVal tbl As Object, ByVal rowIndex As Long)
+    Dim c As Long
+    For c = 1 To tbl.Columns.Count
+        tbl.rows(rowIndex).Cells(c).Range.text = ""
+    Next c
+End Sub
+
+Private Function FindTableHeaderCol(ByVal tbl As Object, ParamArray tokens() As Variant) As Long
+    Dim c As Long, i As Long
+    Dim Header As String, tok As String
+
+    For c = 1 To tbl.Columns.Count
+        Header = LCase$(CleanWordTableText(tbl.cell(1, c).Range.text))
+        For i = LBound(tokens) To UBound(tokens)
+            tok = LCase$(CStr(tokens(i)))
+            If Len(tok) > 0 Then
+                If InStr(1, Header, tok, vbTextCompare) > 0 Then
+                    FindTableHeaderCol = c
+                    Exit Function
+                End If
+            End If
+        Next i
+    Next c
+
+    FindTableHeaderCol = 0
+End Function
+
+Private Sub RemovePlaceholderRows(tbl As Object)
+    On Error Resume Next
+    Dim i As Long
+    For i = tbl.rows.Count To 1 Step -1
+        If InStr(1, tbl.rows(i).Range.text, "<DELETE>", vbTextCompare) > 0 Then
+            tbl.rows(i).Delete
+        End If
+    Next i
+End Sub
+
+Private Sub RemoveBlankRows(tbl As Object)
+    On Error Resume Next
+    Dim r As Long, c As Long
+    Dim txt As String, anyText As Boolean
+
+    For r = tbl.rows.Count To 2 Step -1
+        anyText = False
+        For c = 1 To tbl.Columns.Count
+            txt = CleanWordTableText(tbl.cell(r, c).Range.text)
+            If Len(txt) > 0 Then
+                anyText = True
+                Exit For
+            End If
+        Next c
+        If Not anyText Then tbl.rows(r).Delete
+    Next r
+End Sub
+
+Private Sub RemoveBlankRowsKeepHeaders(tbl As Object, ByVal headerRowsToKeep As Long)
+    On Error Resume Next
+    Dim r As Long, c As Long
+    Dim txt As String, anyText As Boolean
+    Dim firstDataRow As Long
+
+    firstDataRow = headerRowsToKeep + 1
+    If firstDataRow < 2 Then firstDataRow = 2
+
+    For r = tbl.rows.Count To firstDataRow Step -1
+        anyText = False
+        For c = 1 To tbl.Columns.Count
+            txt = CleanWordTableText(tbl.cell(r, c).Range.text)
+            If Len(txt) > 0 Then
+                anyText = True
+                Exit For
+            End If
+        Next c
+        If Not anyText Then tbl.rows(r).Delete
+    Next r
+End Sub
+
+Private Sub RemoveAllContentControlsInRange(ByVal rng As Object)
+    On Error GoTo SafeExit
+    If rng Is Nothing Then Exit Sub
+
+    Dim i As Long
+    Dim cc As Object
+
+    'Iterate backwards; delete only non-section controls
+    For i = rng.ContentControls.Count To 1 Step -1
+        Set cc = rng.ContentControls(i)
+
+        'Do NOT delete wrapper section tags (we still need them to remove sections cleanly)
+        If Left$(Nz(cc.Tag, ""), 8) <> "Section_" Then
+            On Error Resume Next
+            cc.LockContents = False
+            cc.LockContentControl = False
+            cc.Delete True
+            On Error GoTo 0
+        End If
+    Next i
+
+SafeExit:
+End Sub
+
+Private Sub DeleteRowContainingCC(ByVal cc As Object)
+    On Error Resume Next
+    If cc Is Nothing Then Exit Sub
+
+    If cc.Range.Cells.Count > 0 Then
+        cc.Range.Cells(1).row.Delete
+    Else
+        'Fallback if CC isn't in a table
+        cc.LockContents = False
+        cc.LockContentControl = False
+        cc.Delete
+    End If
+End Sub
+
+
+Private Function FindTemplateRowIndex(ByVal tbl As Object) As Long
+    Dim r As Long
+    Dim rowText As String
+
+    For r = 2 To tbl.rows.Count
+        rowText = LCase$(CleanWordTableText(tbl.rows(r).Range.text))
+        If InStr(rowText, "click or tap here") > 0 Or InStr(rowText, "click here") > 0 Then
+            FindTemplateRowIndex = r
+            Exit Function
+        End If
+    Next r
+
+    For r = 2 To tbl.rows.Count
+        If tbl.rows(r).Range.ContentControls.Count > 0 Then
+            FindTemplateRowIndex = r
+            Exit Function
+        End If
+    Next r
+
+    FindTemplateRowIndex = 2
+End Function
+
+Private Sub EnsureHeaderRowText(ByVal tbl As Object, ParamArray headers() As Variant)
+    If tbl.rows.Count < 1 Then Exit Sub
+
+    Dim c As Long, anyText As Boolean
+    For c = 1 To tbl.Columns.Count
+        If Len(CleanWordTableText(tbl.cell(1, c).Range.text)) > 0 Then
+            anyText = True
+            Exit For
+        End If
+    Next c
+
+    If anyText Then Exit Sub
+
+    For c = 1 To tbl.Columns.Count
+        If c <= (UBound(headers) - LBound(headers) + 1) Then
+            tbl.cell(1, c).Range.text = CStr(headers(LBound(headers) + (c - 1)))
+        End If
+    Next c
+End Sub
+
+Private Sub RemoveSectionTableAndHeading(ByVal doc As Object, ByVal sectionTag As String)
+    On Error Resume Next
+
+    Dim secCC As Object
+    Dim tbl As Object
+    Dim t As Object
+    Dim headerPara As Object
+
+    Set secCC = GetCCByTag(doc, sectionTag)
+    If secCC Is Nothing Then Exit Sub
+
+    UnlockCC secCC
+
+    If secCC.Range.Tables.Count > 0 Then
+        Set tbl = secCC.Range.Tables(1)
+    Else
+        For Each t In doc.Tables
+            If t.Range.Start >= secCC.Range.End And t.Range.Start <= secCC.Range.End + 50 Then
+                Set tbl = t
+                Exit For
+            End If
+        Next t
+    End If
+
+    If Not tbl Is Nothing Then
+        Set headerPara = tbl.Range.Previous(4) ' wdParagraph
+        If Not headerPara Is Nothing Then headerPara.Delete
+        tbl.Delete
+    Else
+        secCC.Range.Delete
+    End If
+
+    UnlockCC secCC
+    secCC.Delete
+End Sub
+
+'========================
+' Token replacement in financials labels
+'========================
+'========================
+' Token replacement in financials labels (Part)
+'========================
+Private Sub ReplaceAllInRange(ByVal rng As Object, ByVal findText As String, ByVal replaceText As String)
+    With rng.Find
+        .ClearFormatting
+        .replacement.ClearFormatting
+        .text = findText
+        .replacement.text = replaceText
+        .Forward = True
+        .Wrap = 1           ' wdFindContinue
+        .Format = False
+        .MatchCase = False
+        .MatchWholeWord = False
+        .MatchWildcards = False
+        .Execute Replace:=2 ' wdReplaceAll
+    End With
+End Sub
+
+Private Sub ReplaceFinancialFooterTokens_Part( _
+    ByVal doc As Object, _
+    ByVal Discount As Double, _
+    ByVal DepositPercent As Double, _
+    ByVal CreditToApply As Currency, _
+    ByVal VATRate As Double)
+
+    Dim rng As Object
+    Set rng = Nothing
+
+    '1) Prefer Section_Financials if it exists
+    Dim secFin As Object
+    Set secFin = GetCCByTag(doc, "Section_Financials")
+    If Not secFin Is Nothing Then
+        UnlockCC secFin
+        Set rng = secFin.Range.Duplicate
+    End If
+
+    '2) Fallback: use the table that contains GrossFee (this is where the tokens are)
+    If rng Is Nothing Then
+        Dim ccGross As Object
+        Set ccGross = GetCCByTag(doc, "GrossFee")
+        If Not ccGross Is Nothing Then
+            If ccGross.Range.Tables.Count > 0 Then
+                Set rng = ccGross.Range.Tables(1).Range.Duplicate
+            End If
+        End If
+    End If
+
+    '3) Last resort: whole document
+    If rng Is Nothing Then
+        Set rng = doc.content.Duplicate
+    End If
+
+    ReplaceAllInRange rng, "XXX", IIf(Discount = 0, "", FormatPercent(Discount, 1))
+    ReplaceAllInRange rng, "YYY", IIf(DepositPercent = 0, "", FormatPercent(DepositPercent, 1))
+    ReplaceAllInRange rng, "ZZZ", IIf(CreditToApply = 0, "", FormatCurrency(CreditToApply, 2))
+    ReplaceAllInRange rng, "VVV", IIf(VATRate = 0, "", FormatPercent(VATRate, 1))
+End Sub
+
+
+'========================
+' Extra helpers (Final)
+'========================
+Private Function NormalizeKey(ByVal s As String) As String
+    ' Normalise whitespace and case so we can reliably de-duplicate rows
+    Dim t As String
+    t = Nz(s, "")
+    t = Replace(t, ChrW(160), " ")      ' NBSP -> space
+    t = Replace(t, vbTab, " ")
+    t = Replace(t, vbCr, " ")
+    t = Replace(t, vbLf, " ")
+    t = Trim$(t)
+
+    ' collapse multiple spaces
+    Do While InStr(t, "  ") > 0
+        t = Replace(t, "  ", " ")
+    Loop
+
+    NormalizeKey = UCase$(t)
+End Function
+
+Private Sub ClearWordTableRowObject(ByVal rowObj As Object)
+    ' Clears all cell text in a Word row object, without relying on row index
+    On Error Resume Next
+    Dim c As Long
+    For c = 1 To rowObj.Cells.Count
+        rowObj.Cells(c).Range.text = ""
+    Next c
+End Sub
+
+Private Function SectionAlreadyDone(doc As Object, ByVal flagName As String) As Boolean
+    On Error Resume Next
+    Dim v As Object
+    Set v = doc.Variables(flagName)
+    SectionAlreadyDone = (Err.Number = 0)
+    Err.Clear
+End Function
+
+Private Sub MarkSectionDone(doc As Object, ByVal flagName As String)
+    On Error Resume Next
+    doc.Variables.Add Name:=flagName, value:="1"
+End Sub
+
+Private Sub ClearWordRowCells(ByVal rowObj As Object)
+    On Error Resume Next
+    Dim c As Long
+    For c = 1 To rowObj.Cells.Count
+        rowObj.Cells(c).Range.text = ""
+    Next c
+End Sub
+
+Private Function GetFinalTableByTags(doc As Object, ByVal sectionTag As String, ByVal headerTag As String, ByRef outSectionCC As Object) As Object
+    Set outSectionCC = Nothing
+
+    '1) Prefer section content control
+    On Error Resume Next
+    Set outSectionCC = GetCCByTag(doc, sectionTag)
+    On Error GoTo 0
+
+    If Not outSectionCC Is Nothing Then
+        UnlockCC outSectionCC
+        If outSectionCC.Range.Tables.Count > 0 Then
+            Set GetFinalTableByTags = outSectionCC.Range.Tables(1)
+            Exit Function
+        End If
+    End If
+
+    '2) Fallback: find first table after a header/anchor content control
+    Set GetFinalTableByTags = FindFirstTableAfterTag(doc, headerTag)
+End Function
+
+Private Function FindFirstTableAfterTag(doc As Object, ByVal headerTag As String) As Object
+    Dim cc As Object
+    Set cc = GetCCByTag(doc, headerTag)
+    If cc Is Nothing Then Exit Function
+
+    Dim t As Object, best As Object
+    For Each t In doc.Tables
+        If t.Range.Start >= cc.Range.End Then
+            If best Is Nothing Then
+                Set best = t
+            ElseIf t.Range.Start < best.Range.Start Then
+                Set best = t
+            End If
+        End If
+    Next t
+
+    Set FindFirstTableAfterTag = best
+End Function
+
+Private Function NormaliseKeyText(ByVal v As Variant) As String
+    Dim s As String
+    s = Nz(v, "")
+    s = Replace(s, ChrW(160), " ")
+    s = Replace(s, vbTab, " ")
+    s = Replace(s, vbCr, " ")
+    s = Replace(s, vbLf, " ")
+    s = Trim$(s)
+    Do While InStr(s, "  ") > 0
+        s = Replace(s, "  ", " ")
+    Loop
+    NormaliseKeyText = UCase$(s)
+End Function
+
+'Private Sub ClearWordRowCells(ByVal rowObj As Object)
+'    Dim i As Long
+'    For i = 1 To rowObj.Cells.Count
+'        rowObj.Cells(i).Range.text = vbNullString
+'    Next i
+'End Sub
+
+Private Function Final_AddReportRow(tbl As Object, templateRow As Object, templateFmt As Object, ByRef firstRow As Boolean) As Object
+    Dim r As Object
+    If firstRow Then
+        Set r = templateRow
+        firstRow = False
+    Else
+        Set r = tbl.rows.Add
+        r.Range.FormattedText = templateFmt.FormattedText
+        RemoveAllContentControlsInRange r.Range
+        ClearWordRowCells r
+    End If
+    Set Final_AddReportRow = r
+End Function
+
+Private Sub Final_SetReportRow(ByVal rowObj As Object, ByVal colCount As Long, _
+                                ByVal c1 As String, ByVal c2 As String, ByVal c3 As String, ByVal c4 As String, _
+                                ByVal c5 As String, ByVal c6 As String, ByVal c7 As String)
+
+    'Prefer 7-column layout (Type, blank, Fee, blank, Deposit, Qty, Total)
+    If colCount >= 7 Then
+        rowObj.Cells(1).Range.text = c1
+        rowObj.Cells(2).Range.text = c2
+        rowObj.Cells(3).Range.text = c3
+        rowObj.Cells(4).Range.text = c4
+        rowObj.Cells(5).Range.text = c5
+        rowObj.Cells(6).Range.text = c6
+        rowObj.Cells(7).Range.text = c7
+    ElseIf colCount >= 5 Then
+        'Fallback 5-col layout (Type, Fee, Deposit, Qty, Total)
+        rowObj.Cells(1).Range.text = c1
+        rowObj.Cells(2).Range.text = c3
+        rowObj.Cells(3).Range.text = c5
+        rowObj.Cells(4).Range.text = c6
+        rowObj.Cells(5).Range.text = c7
+    Else
+        'Last resort
+        rowObj.Cells(1).Range.text = c1
+    End If
+End Sub
+
+Private Sub DeduplicateWordTableRows(ByVal tbl As Object, ByVal headerRowsToKeep As Long, ParamArray keyCols() As Variant)
+    On Error Resume Next
+
+    Dim seen As Object
+    Set seen = CreateObject("Scripting.Dictionary")
+
+    Dim r As Long, i As Long
+    Dim k As String, colN As Long, cellText As String
+
+    'Work top-down so we keep the first occurrence (highest up the page)
+    Dim lastRow As Long
+    lastRow = tbl.rows.Count
+    
+    r = headerRowsToKeep + 1
+    Do While r <= lastRow
+        k = ""
+        For i = LBound(keyCols) To UBound(keyCols)
+            colN = CLng(keyCols(i))
+            cellText = CleanWordTableText(tbl.cell(r, colN).Range.text)
+            k = k & "|" & NormalizeKey(cellText)
+        Next i
+    
+        If Len(k) > 0 Then
+            If seen.exists(k) Then
+                tbl.rows(r).Delete
+                lastRow = lastRow - 1
+                'do NOT increment r (rows shifted up)
+            Else
+                seen.Add k, True
+                r = r + 1
+            End If
+        Else
+            r = r + 1
+        End If
+    Loop
+
+End Sub
+
+'========================
+' Remove "Less Discount" row when Discount = 0
+'========================
+Private Sub RemoveDiscountRowIfZero(ByVal doc As Object, ByVal InvoiceID As Long)
+    On Error GoTo SafeExit
+
+    Dim disc As Double
+    disc = Nz(DLookup("Discount", "q_IssuedInvoiceDocument", "InvoiceID=" & InvoiceID), 0)
+
+    ' Treat anything effectively zero as zero
+    If Abs(disc) > 0.0000001 Then Exit Sub
+
+    ' 1) Preferred: delete the table row containing the LessDiscount value content control
+    Dim ccLD As Object
+    Set ccLD = GetCCByTag(doc, "LessDiscount")
+
+    If Not ccLD Is Nothing Then
+        UnlockCC ccLD
+        If ccLD.Range.Cells.Count > 0 Then
+            ccLD.Range.Cells(1).row.Delete
+            Exit Sub
+        End If
+    End If
+
+    ' 2) Fallback: scan the financials table (if it exists inside Section_Financials)
+    Dim secCC As Object
+    Set secCC = GetCCByTag(doc, "Section_Financials")
+    If Not secCC Is Nothing Then
+        UnlockCC secCC
+        If secCC.Range.Tables.Count > 0 Then
+            If DeleteTableRowByToken(secCC.Range.Tables(1), "less discount") Then Exit Sub
+        End If
+    End If
+
+    ' 3) Last resort: scan every table in the document
+    Dim tbl As Object
+    For Each tbl In doc.Tables
+        If DeleteTableRowByToken(tbl, "less discount") Then Exit Sub
+    Next tbl
+
+SafeExit:
+End Sub
+
+Private Function DeleteTableRowByToken(ByVal tbl As Object, ByVal token As String) As Boolean
+    On Error GoTo SafeExit
+
+    Dim r As Long
+    For r = tbl.rows.Count To 1 Step -1
+        If InStr(1, LCase$(CleanWordTableText(tbl.rows(r).Range.text)), LCase$(token), vbTextCompare) > 0 Then
+            tbl.rows(r).Delete
+            DeleteTableRowByToken = True
+            Exit Function
+        End If
+    Next r
+
+SafeExit:
+End Function
+
+Private Function GetLatestDepositInvoiceRefForOrder(ByVal OrderID As Long) As String
+    GetLatestDepositInvoiceRefForOrder = modInvoice_Common.GetLatestDepositInvoiceRefForOrder(OrderID)
+End Function
+
+Private Sub Fill_DepositREF_Part(ByVal doc As Object, ByVal InvoiceID As Long)
+    Dim ordID As Long
+    Dim depRef As String
+
+    ordID = GetOrderIDForInvoice(InvoiceID)
+    depRef = GetLatestDepositInvoiceRefForOrder(ordID)
+
+    ' Write DepositREF if present; if blank, remove its row
+    Dim cc As Object
+    Set cc = GetCCByTag(doc, "DepositREF")
+    If Not cc Is Nothing Then
+        UnlockCC cc
+        cc.Range.text = depRef
+        If Len(Trim$(depRef)) = 0 Then
+            DeleteRowContainingCC cc
+        End If
+    End If
+End Sub
+
+Private Sub RebuildAdditionalsHeaderRow(ByVal headerRow As Object)
+    'Expected headers:
+    ' 7-cell: Type | Sample Number | Fee | (blank) | Deposit | Qty. | Total
+    ' 6-cell fallback: Type | Sample Number | Fee | Deposit | Qty. | Total
+
+    If headerRow Is Nothing Then Exit Sub
+
+    Dim cellCount As Long
+    cellCount = headerRow.Cells.Count
+
+    'Hard reset the header row then write labels
+    On Error Resume Next
+    RemoveAllContentControlsInRange headerRow.Range
+    ClearWordRowCells headerRow
+    On Error GoTo 0
+
+    If cellCount >= 7 Then
+        headerRow.Cells(1).Range.text = "Type"
+        headerRow.Cells(2).Range.text = "Sample Number"
+        headerRow.Cells(3).Range.text = "Fee"
+        headerRow.Cells(4).Range.text = ""          'blank spacer
+        headerRow.Cells(5).Range.text = "Deposit"
+        headerRow.Cells(6).Range.text = "Qty."
+        headerRow.Cells(7).Range.text = "Total"
+    ElseIf cellCount = 6 Then
+        headerRow.Cells(1).Range.text = "Type"
+        headerRow.Cells(2).Range.text = "Sample Number"
+        headerRow.Cells(3).Range.text = "Fee"
+        headerRow.Cells(4).Range.text = "Deposit"
+        headerRow.Cells(5).Range.text = "Qty."
+        headerRow.Cells(6).Range.text = "Total"
+    End If
+
+    On Error Resume Next
+    headerRow.Range.Font.Bold = True
+    On Error GoTo 0
+End Sub
+
+'========================
+' SQL-safe money literal
+' (forces "." decimal separator, removes thousand separators)
+'========================
+Private Function SqlMoney(ByVal v As Currency) As String
+    Dim s As String
+    Dim decSep As String
+
+    decSep = Mid$(CStr(1.1), 2, 1)          ' locale decimal separator
+    s = Format$(v, "0.00")                  ' locale-formatted number
+
+    ' Remove thousand separators (commas in UK, but safe either way)
+    s = Replace(s, ",", "")
+
+    ' Force decimal separator to "."
+    If decSep <> "." Then
+        s = Replace(s, decSep, ".")
+    End If
+
+    SqlMoney = s
+End Function
+
+'========================
+' Field-exists check (table-level)
+'========================
+Private Function TableHasField(ByVal tableName As String, ByVal fieldName As String) As Boolean
+    On Error GoTo SafeExit
+    Dim tdf As DAO.TableDef
+    Dim fld As DAO.Field
+
+    Set tdf = CurrentDb.TableDefs(tableName)
+    For Each fld In tdf.fields
+        If StrComp(fld.Name, fieldName, vbTextCompare) = 0 Then
+            TableHasField = True
+            Exit Function
+        End If
+    Next fld
+
+SafeExit:
+End Function
+
+'========================
+' Persist invoice payable totals (post-credit)
+'   NetAfterCredit = LessDeposit - CreditApplied (net)
+'   VATAmount      = VAT on NetAfterCredit
+'   TotalPayable   = NetAfterCredit + VATAmount (inc VAT)
+'========================
+Private Sub PersistInvoicePayableTotals_Part( _
+    ByVal InvoiceID As Long, _
+    ByVal netAfterCredit As Currency, _
+    ByVal VATAmount As Currency, _
+    ByVal totalPayable As Currency)
+
+    On Error GoTo SafeExit
+
+    Dim setClause As String
+    setClause = ""
+
+    ' Always store the value the customer should pay (inc VAT)
+    If TableHasField("t_Invoices", "InvoiceIncVAT") Then
+        setClause = setClause & "InvoiceIncVAT=" & SqlMoney(totalPayable)
+    End If
+
+    ' Store VAT amount if present
+    If TableHasField("t_Invoices", "VATAmount") Then
+        If Len(setClause) > 0 Then setClause = setClause & ", "
+        setClause = setClause & "VATAmount=" & SqlMoney(VATAmount)
+    End If
+
+    ' Store net-after-credit if present (useful for reporting)
+    If TableHasField("t_Invoices", "InvoiceValue_Current") Then
+        If Len(setClause) > 0 Then setClause = setClause & ", "
+        setClause = setClause & "InvoiceValue_Current=" & SqlMoney(netAfterCredit)
+    End If
+
+    If TableHasField("t_Invoices", "InvoiceValue") Then
+        If Len(setClause) > 0 Then setClause = setClause & ", "
+        setClause = setClause & "InvoiceValue=" & SqlMoney(netAfterCredit)
+    End If
+
+    If Len(setClause) = 0 Then Exit Sub
+
+    CurrentDb.Execute _
+        "UPDATE t_Invoices SET " & setClause & " WHERE InvoiceID=" & InvoiceID & ";", _
+        dbFailOnError
+
+SafeExit:
+End Sub
+
+
+'Private Function ResolveAltTestFeeField_Part() As String
+'    ' Auto-detect the unit-fee field on t_AccreditedTests for "Additional Tests".
+'    ' If your real field name is not in this list, add it here.
+'    Static cached As String
+'    If Len(cached) > 0 Then
+'        ResolveAltTestFeeField_Part = cached
+'        Exit Function
+'    End If
+'
+'    Dim candidates As Variant
+'    candidates = Array( _
+'        "AltTestPrice", "AltTestsPrice", "AltTestFee", "AltFee", _
+'        "AdditionalTestPrice", "AdditionalTestsPrice", "AdditionalTestsFee", _
+'        "AdditionalTests", "AdditionalTest", _
+'        "AlternativeTestPrice", "AltPrice", "AltTestCost", "AltTestsCost" _
+'    )
+'
+'    Dim i As Long
+'    For i = LBound(candidates) To UBound(candidates)
+'        If TableFieldExists_Part("t_AccreditedTests", CStr(candidates(i))) Then
+'            cached = CStr(candidates(i))
+'            Exit For
+'        End If
+'    Next i
+'
+'    ResolveAltTestFeeField_Part = cached
+'End Function
+
+'Private Function TableFieldExists_Part(ByVal tableName As String, ByVal fieldName As String) As Boolean
+'    On Error GoTo SafeExit
+'    Dim tdf As DAO.TableDef
+'    Dim fld As DAO.Field
+'
+'    Set tdf = CurrentDb.TableDefs(tableName)
+'    For Each fld In tdf.Fields
+'        If StrComp(fld.name, fieldName, vbTextCompare) = 0 Then
+'            TableFieldExists_Part = True
+'            Exit Function
+'        End If
+'    Next fld
+'
+'SafeExit:
+'End Function
+
+Private Sub ClearDiscountHeaderIfNoDiscount(ByVal tbl As Object, ByVal headerRowsToKeep As Long)
+    Dim discCol As Long
+    discCol = FindTableHeaderCol(tbl, "disc", "discount")
+    If discCol = 0 Then Exit Sub
+
+    Dim r As Long
+    For r = 1 To headerRowsToKeep
+        On Error Resume Next
+        tbl.cell(r, discCol).Range.text = vbNullString
+        On Error GoTo 0
+    Next r
+End Sub

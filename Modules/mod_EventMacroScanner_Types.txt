@@ -1,0 +1,19 @@
+'============================================================
+' Purpose:
+'   Holds PUBLIC user-defined types used by the scanner, so they
+'   can be referenced/passed across multiple standard modules.
+'============================================================
+Option Compare Database
+Option Explicit
+
+Public Type TRow
+    SortKey As String
+    ObjectType As String
+    ObjectName As String
+    ControlName As String
+    ControlType As String
+    EventProperty As String
+    eventValue As String
+    BindingKind As String
+    Notes As String
+End Type

@@ -1,0 +1,811 @@
+Option Compare Database
+Option Explicit
+
+'========================================================
+' mod_CommonClientComms
+'
+' Common routines for:
+'   - Send WAF email
+'   - Email Client (template-driven)
+'   - Schedule Follow-Up Outlook appointment
+'
+' Notes:
+'   - Outlook is late-bound (no reference required).
+'   - Email templates are read from table: t_EmailTemplate
+'   - TempVars used for attachments (same as existing):
+'       TempVars("WAFLocation")        'folder path for WAF docs
+'       TempVars("TnCDocument")        'full file path
+'       TempVars("CompanyInfoDocument")'full file path
+'       TempVars("CreditAppDocument")  'full file path
+'========================================================
+
+
+'==========================
+' PUBLIC WRAPPERS (ENQUIRIES)
+'==========================
+Public Sub Enquiry_SendWAF(ByVal frm As Access.Form)
+    ' Enquiries mapping:
+    '   WAF control:         "WAF"
+    '   Contact email:       "ContactEmail"
+    '   Contact combo:       "ContactID"
+    '   ClientID control:    "ClientID"
+    '   Department control:  "Department"
+    '   Standard control:    "Standard"
+    SendWAF_Core frm, _
+                 "WAF", _
+                 "ContactEmail", _
+                 "ContactID", _
+                 "ClientID", _
+                 "Department", _
+                 "Standard"
+End Sub
+
+Public Sub Enquiry_EmailClient(ByVal frm As Access.Form)
+    ' Enquiries mapping:
+    '   Template:            Enquiry_Client
+    '   Email textbox:       ContactEmail
+    '   Contact combo:       ContactID
+    '   Client combo:        ClientID
+    '   Standard combo:      Standard
+    EmailClient_Core frm, _
+                     "Enquiry_Client", _
+                     "ContactEmail", _
+                     "ContactID", _
+                     "ClientID", _
+                     "Standard", _
+                     "Department"
+End Sub
+
+Public Sub Enquiry_ScheduleFollowUp(ByVal frm As Access.Form)
+    ' Enquiries mapping:
+    '   ID control:          EnquiryID
+    '   Notes control:       EnquiryNotes
+    '   Dept control:        Department
+    '   Standard control:    Standard
+    '   ClientID:            ClientID
+    '   ContactID:           ContactID
+    ScheduleFollowUp_Core frm, _
+                          "Enquiry", _
+                          "EnquiryID", _
+                          vbNullString, _
+                          "EnquiryNotes", _
+                          vbNullString, _
+                          "ClientID", _
+                          "ContactID", _
+                          "Department", _
+                          "Standard"
+End Sub
+
+
+'==========================
+' PUBLIC WRAPPERS (QUOTATIONS)
+'==========================
+Public Sub Quote_SendWAF(ByVal frm As Access.Form)
+    ' Quotations mapping:
+    '   WAF control:         "WAFDoc"
+    '   Email textbox:       "Email"
+    '   Contact combo:       "ContactID"
+    '   ClientID control:    "ClientID"
+    '   Department control:  "DeptID"
+    '   Standard control:    "StandardID"
+    SendWAF_Core frm, _
+                 "WAFDoc", _
+                 "Email", _
+                 "ContactID", _
+                 "ClientID", _
+                 "DeptID", _
+                 "StandardID"
+End Sub
+
+Public Sub Quote_EmailClient(ByVal frm As Access.Form)
+    ' Quotations mapping:
+    '   Template preference: Quote_Client (fallback to Enquiry_Client)
+    '   Email textbox:       Email
+    '   Contact combo:       ContactID
+    '   Client combo:        ClientID
+    '   Standard combo:      StandardID
+    '   Dept combo:          DeptID
+    '
+    ' If you don't have Quote_Client in t_EmailTemplate yet, either:
+    '   - add it, OR
+    '   - this routine will fall back to Enquiry_Client, OR
+    '   - final fallback is a minimal "Dear {Contact}" email.
+    EmailClient_Core frm, _
+                     "Quote_Client", _
+                     "Email", _
+                     "ContactID", _
+                     "ClientID", _
+                     "StandardID", _
+                     "DeptID", _
+                     True  'try_fallback_template
+End Sub
+
+Public Sub Quote_ScheduleFollowUp(ByVal frm As Access.Form)
+    ' Quotations mapping:
+    '   ID control:          QuoteID  (or TempVars("QuoteID") if QuoteID control not present)
+    '   Quote number lookup: t_Quotations.QuoteNumber WHERE QuoteID=...
+    '   Notes controls:      EnquiryNotes, QuoteNotes
+    '   Dept control:        DeptID
+    '   Standard control:    StandardID
+    '   ClientID:            ClientID
+    '   ContactID:           ContactID
+    ScheduleFollowUp_Core frm, _
+                          "Quote", _
+                          "QuoteID", _
+                          "QuoteNumber", _
+                          "EnquiryNotes", _
+                          "QuoteNotes", _
+                          "ClientID", _
+                          "ContactID", _
+                          "DeptID", _
+                          "StandardID"
+End Sub
+
+
+
+'==========================
+' CORE: SEND WAF EMAIL
+'==========================
+Private Sub SendWAF_Core( _
+    ByVal frm As Access.Form, _
+    ByVal wafControlName As String, _
+    ByVal emailControlName As String, _
+    ByVal contactComboName As String, _
+    ByVal clientIDControlName As String, _
+    ByVal deptControlName As String, _
+    ByVal standardControlName As String _
+)
+    On Error GoTo ErrHandler
+
+    Dim strTo As String
+    Dim contactName As String
+    Dim DeptName As String
+    Dim StdName As String, stdCode As String, stdLong As String
+
+    ' Validate WAF selection
+    If Not ControlExists(frm, wafControlName) Then
+        MsgBox "Missing control '" & wafControlName & "' on form.", vbExclamation
+        Exit Sub
+    End If
+
+    If Nz(frm.Controls(wafControlName).value, vbNullString) = vbNullString Then
+        MsgBox "Please select a WAF from the list.", vbOKOnly, "Select a WAF document"
+        Exit Sub
+    End If
+
+    ' Resolve recipient email
+    If Not ControlExists(frm, emailControlName) Then
+        MsgBox "Missing control '" & emailControlName & "' on form.", vbExclamation
+        Exit Sub
+    End If
+    strTo = Nz(frm.Controls(emailControlName).value, vbNullString)
+
+    ' Resolve contact name from combo (Column(1) like existing)
+    contactName = SafeCtrlColumnText(frm, contactComboName, 1, vbNullString)
+
+    DeptName = SafeCtrlColumnText(frm, deptControlName, 1, Nz(SafeCtrlText(frm, deptControlName), "[Unknown Department]"))
+    StdName = SafeCtrlColumnText(frm, standardControlName, 1, Nz(SafeCtrlText(frm, standardControlName), "[Unknown Standard]"))
+    stdCode = SafeCtrlColumnText(frm, standardControlName, 2, vbNullString)
+    stdLong = SafeCtrlColumnText(frm, standardControlName, 3, vbNullString)
+
+    ' Attachment paths (same TempVars you already use)
+    Dim wafFolder As String
+    Dim WAFFileName As String
+    Dim wafFullPath As String
+    Dim TnCPath As String
+    Dim infoPath As String
+    Dim creditPath As String
+
+    Dim wafKey As Variant
+    wafKey = frm.Controls(wafControlName).value
+    
+    ' Filename shown in the combo/list (Column(1) in your existing pattern),
+    ' fallback to the control Value if needed.
+    WAFFileName = SafeCtrlColumnText(frm, wafControlName, 1, Nz(frm.Controls(wafControlName).value, vbNullString))
+    
+    ' NEW: WAF folder comes from t_WAFs.WAFLocation for the selected record
+    wafFolder = Nz(LookupWAFLocation(wafKey), vbNullString)
+    
+    ' Combine safely (handles trailing "\" in folder and leading "\" in filename)
+    wafFullPath = CombineFolderAndFile(wafFolder, WAFFileName)
+    
+    ' last-resort: if no folder returned, still try attaching whatever the filename/value is
+    If Len(Trim$(wafFullPath)) = 0 Then
+        wafFullPath = Nz(WAFFileName, vbNullString)
+    End If
+
+    TnCPath = Nz(GetTempVarValue("TnCDocument"), vbNullString)
+    infoPath = Nz(GetTempVarValue("CompanyInfoDocument"), vbNullString)
+
+    ' Credit app only if client has no credit terms on file
+    creditPath = vbNullString
+    Dim ClientID As Variant
+    ClientID = SafeCtrlValue(frm, clientIDControlName)
+    If Not IsNull(ClientID) And Len(Trim$(CStr(ClientID))) > 0 Then
+        If ClientRequiresCreditApp(CLng(ClientID)) Then
+            creditPath = Nz(GetTempVarValue("CreditAppDocument"), vbNullString)
+        End If
+    End If
+
+    ' Build HTML body (kept close to your current Enquiries version)
+    Dim htmlBody As String
+    htmlBody = "<p>Dear " & HtmlEncode(contactName) & ",</p>"
+
+    If Len(Trim$(stdCode)) > 0 Or Len(Trim$(stdLong)) > 0 Then
+        htmlBody = htmlBody & "<p>Thank you for your enquiry regarding <strong>" & _
+                             HtmlEncode(Trim$(stdCode & IIf(Len(stdCode) > 0 And Len(stdLong) > 0, " - ", vbNullString) & stdLong)) & _
+                             ".</strong></p>"
+    End If
+
+    htmlBody = htmlBody & "<p>Please complete the attached WAF Application Form and return it to us along with any relevant:</p>"
+    htmlBody = htmlBody & "<ul>" & _
+                          "<li>Technical Data Sheets</li>" & _
+                          "<li>Drawings</li>" & _
+                          "<li>MSDS certificates</li>" & _
+                          "<li>Additional Supporting Documents</li>" & _
+                          "</ul>"
+    htmlBody = htmlBody & "<p>Information provided in the WAF will be used in the final Technical Report.</p>"
+    htmlBody = htmlBody & "<p>If the specification is non-standard, additional details may be required. Alternatively, we can arrange a Teams call if you prefer.</p>"
+    htmlBody = htmlBody & "<p>In the meantime, if you would like to discuss anything at all, please don't hesitate to contact us.</p>"
+    htmlBody = htmlBody & "<p>All the best,</p>"
+
+    ' Create Outlook email
+    Dim objOutlook As Object
+    Dim objEmail As Object
+    Set objOutlook = CreateObject("Outlook.Application")
+    Set objEmail = objOutlook.CreateItem(0) ' MailItem
+
+    With objEmail
+        .To = strTo
+        .cc = "william.howard@attainrtc.co.uk; adam.boumnaia@attainrtc.co.uk"
+        .BCC = "ARTCfile@attainrtc.co.uk; basak.arslan@attainrtc.co.uk"
+        .Subject = "Application for Quotation - Attain RTC / " & DeptName & " (" & StdName & ")"
+        .htmlBody = htmlBody
+
+        AddAttachmentIfExists objEmail, wafFullPath
+        AddAttachmentIfExists objEmail, TnCPath
+        AddAttachmentIfExists objEmail, infoPath
+        AddAttachmentIfExists objEmail, creditPath
+
+        .Display
+    End With
+
+CleanUp:
+    On Error Resume Next
+    Set objEmail = Nothing
+    Set objOutlook = Nothing
+    Exit Sub
+
+ErrHandler:
+    MsgBox "SendWAF error " & Err.Number & ": " & Err.Description, vbCritical
+    Resume CleanUp
+End Sub
+
+
+'==========================
+' CORE: EMAIL CLIENT (TEMPLATE)
+'==========================
+Private Sub EmailClient_Core( _
+    ByVal frm As Access.Form, _
+    ByVal TemplateName As String, _
+    ByVal emailControlName As String, _
+    ByVal contactComboName As String, _
+    ByVal clientComboName As String, _
+    ByVal standardComboName As String, _
+    ByVal deptComboName As String, _
+    Optional ByVal tryFallbackTemplate As Boolean = False _
+)
+    On Error GoTo ErrHandler
+
+    Dim ContactEmail As String
+    ContactEmail = Nz(SafeCtrlText(frm, emailControlName), vbNullString)
+
+    Dim contactName As String
+    contactName = SafeCtrlColumnText(frm, contactComboName, 1, vbNullString)
+
+    Dim ClientName As String
+    ClientName = SafeCtrlColumnText(frm, clientComboName, 1, vbNullString)
+
+    Dim standardName As String
+    standardName = SafeCtrlColumnText(frm, standardComboName, 1, vbNullString)
+
+    Dim DeptName As String
+    DeptName = SafeCtrlColumnText(frm, deptComboName, 1, vbNullString)
+
+    ' Some optional IDs (useful if templates include them)
+    Dim EnquiryID As String, QuoteID As String, quoteNum As String
+    EnquiryID = SafeToString(GetControlOrTempVar(frm, "EnquiryID"))
+    QuoteID = SafeToString(GetControlOrTempVar(frm, "QuoteID"))
+
+    If Len(Trim$(QuoteID)) > 0 And IsNumeric(QuoteID) Then
+        quoteNum = Nz(DLookup("QuoteNumber", "t_Quotations", "QuoteID=" & CLng(QuoteID)), vbNullString)
+    Else
+        quoteNum = vbNullString
+    End If
+
+    ' Load template (with optional fallback)
+    Dim toAddr As String, ccAddr As String, bccAddr As String, subj As String, bodyHtml As String
+    If Not LoadEmailTemplate(TemplateName, toAddr, ccAddr, bccAddr, subj, bodyHtml) Then
+        If tryFallbackTemplate Then
+            If Not LoadEmailTemplate("Enquiry_Client", toAddr, ccAddr, bccAddr, subj, bodyHtml) Then
+                ' final fallback: minimal email
+                toAddr = "[ContactEmail]"
+                ccAddr = vbNullString
+                bccAddr = vbNullString
+                subj = "Message from " & Nz(Application.CurrentProject.Name, "our office")
+                bodyHtml = "<p>Dear [ContactName],</p>"
+            End If
+        Else
+            ' final fallback: minimal email
+            toAddr = "[ContactEmail]"
+            ccAddr = vbNullString
+            bccAddr = vbNullString
+            subj = "Message from " & Nz(Application.CurrentProject.Name, "our office")
+            bodyHtml = "<p>Dear [ContactName],</p>"
+        End If
+    End If
+
+    ' Ensure sensible default to if template leaves blank
+    If Len(Trim$(toAddr)) = 0 Then toAddr = "[ContactEmail]"
+    If Len(Trim$(bodyHtml)) = 0 Then bodyHtml = "<p>Dear [ContactName],</p>"
+
+    ' Apply placeholders (extend as needed)
+    toAddr = ApplyPairs(toAddr, _
+                        "[ContactEmail]", ContactEmail, _
+                        "[ContactName]", contactName, _
+                        "[ClientName]", ClientName, _
+                        "[StandardName]", standardName, _
+                        "[DepartmentName]", DeptName, _
+                        "[EnquiryID]", EnquiryID, _
+                        "[QuoteID]", QuoteID, _
+                        "[QuoteNumber]", quoteNum)
+
+    ccAddr = ApplyPairs(ccAddr, _
+                        "[ContactEmail]", ContactEmail, _
+                        "[ClientName]", ClientName, _
+                        "[StandardName]", standardName)
+
+    bccAddr = ApplyPairs(bccAddr, _
+                         "[ContactEmail]", ContactEmail, _
+                         "[ClientName]", ClientName)
+
+    subj = ApplyPairs(subj, _
+                      "[ContactName]", contactName, _
+                      "[ClientName]", ClientName, _
+                      "[StandardName]", standardName, _
+                      "[DepartmentName]", DeptName, _
+                      "[EnquiryID]", EnquiryID, _
+                      "[QuoteNumber]", quoteNum)
+
+    bodyHtml = ApplyPairs(bodyHtml, _
+                          "[ContactName]", contactName, _
+                          "[ContactEmail]", ContactEmail, _
+                          "[ClientName]", ClientName, _
+                          "[StandardName]", standardName, _
+                          "[DepartmentName]", DeptName, _
+                          "[EnquiryID]", EnquiryID, _
+                          "[QuoteNumber]", quoteNum)
+
+    ' Fallback To if still blank after replacement
+    If Len(Trim$(toAddr)) = 0 Then toAddr = ContactEmail
+
+    ' Create email
+    Dim objOutlook As Object, objEmail As Object
+    Set objOutlook = CreateObject("Outlook.Application")
+    Set objEmail = objOutlook.CreateItem(0)
+
+    Dim finalHtml As String
+    finalHtml = "<html><head>" & _
+                "<meta http-equiv='Content-Type' content='text/html; charset=utf-8'>" & _
+                "<style type='text/css'>" & _
+                "body, p, span, td {font-family:Ebrima, sans-serif !important; font-size:10pt !important;}" & _
+                "</style></head><body>" & _
+                bodyHtml & _
+                "</body></html>"
+
+    With objEmail
+        .To = toAddr
+        .cc = ccAddr
+        .BCC = bccAddr
+        .Subject = subj
+        .htmlBody = finalHtml
+        .Display
+    End With
+
+CleanUp:
+    On Error Resume Next
+    Set objEmail = Nothing
+    Set objOutlook = Nothing
+    Exit Sub
+
+ErrHandler:
+    MsgBox "EmailClient error " & Err.Number & ": " & Err.Description, vbCritical
+    Resume CleanUp
+End Sub
+
+Private Function SafeToString(ByVal v As Variant) As String
+    If IsNull(v) Then
+        SafeToString = vbNullString
+    Else
+        SafeToString = CStr(v)
+    End If
+End Function
+
+'==========================
+' CORE: SCHEDULE FOLLOW-UP (OUTLOOK APPOINTMENT)
+'==========================
+Private Sub ScheduleFollowUp_Core( _
+    ByVal frm As Access.Form, _
+    ByVal contextName As String, _
+    ByVal idControlName As String, _
+    ByVal quoteNumberFieldName As String, _
+    ByVal enquiryNotesControlName As String, _
+    ByVal quoteNotesControlName As String, _
+    ByVal clientIDControlName As String, _
+    ByVal contactIDControlName As String, _
+    ByVal deptControlName As String, _
+    ByVal standardControlName As String _
+)
+    On Error GoTo Err_Handler
+
+    ' Validate date/time controls (both your forms already use these names)
+    If Nz(SafeCtrlText(frm, "FollowUpDate"), vbNullString) = vbNullString Then
+        MsgBox "Please enter a valid date for the follow up meeting", vbInformation, "Valid date required"
+        Exit Sub
+    End If
+    If Nz(SafeCtrlText(frm, "FollowUpTime"), vbNullString) = vbNullString Then
+        frm.Controls("FollowUpTime").value = TimeValue("09:00:00")
+    End If
+
+    Dim FollowUpDate As Date, FollowUpTime As Date
+    FollowUpDate = CDate(frm.Controls("FollowUpDate").value)
+    FollowUpTime = CDate(frm.Controls("FollowUpTime").value)
+
+    Dim ClientID As Long, ContactID As Long
+    ClientID = CLng(Nz(SafeCtrlValue(frm, clientIDControlName), 0))
+    ContactID = CLng(Nz(SafeCtrlValue(frm, contactIDControlName), 0))
+
+    Dim ClientN As String, ContactN As String, ContactE As String, ContactP As String
+    ClientN = Nz(DLookup("Client", "t_Clients", "ClientID=" & ClientID), "[Unknown Client]")
+    ContactN = Nz(DLookup("ConcatName", "t_Contacts", "ContactID=" & ContactID), "[Unknown Contact]")
+    ContactE = Nz(DLookup("EmailAddress", "t_Contacts", "ContactID=" & ContactID), vbNullString)
+    ContactP = Nz(DLookup("PrimaryNumber", "t_Contacts", "ContactID=" & ContactID), _
+                  Nz(DLookup("SecondaryNumber", "t_Contacts", "ContactID=" & ContactID), vbNullString))
+
+    Dim Department As String
+    Department = SafeCtrlColumnText(frm, deptControlName, 1, Nz(SafeCtrlText(frm, deptControlName), "[Unknown Department]"))
+
+    Dim StdName As String
+    StdName = SafeCtrlColumnText(frm, standardControlName, 1, Nz(SafeCtrlText(frm, standardControlName), vbNullString))
+
+    Dim ENQNotes As String, QNotes As String
+    ENQNotes = Nz(SafeCtrlText(frm, enquiryNotesControlName), vbNullString)
+    QNotes = Nz(SafeCtrlText(frm, quoteNotesControlName), vbNullString)
+
+    ' Optional Quote Number (if context is Quote and QuoteID can be resolved)
+    Dim QNum As String
+    QNum = vbNullString
+    If LCase$(contextName) = "quote" And Len(Trim$(quoteNumberFieldName)) > 0 Then
+        Dim qid As Variant
+        qid = GetControlOrTempVar(frm, idControlName)
+        If Not IsNull(qid) And IsNumeric(qid) Then
+            QNum = Nz(DLookup(quoteNumberFieldName, "t_Quotations", "QuoteID=" & CLng(qid)), vbNullString)
+        End If
+    End If
+
+    ' Create Outlook appointment (late bound)
+    Dim OutlookApp As Object, OutlookAppt As Object
+    Set OutlookApp = CreateObject("Outlook.Application")
+    Set OutlookAppt = OutlookApp.CreateItem(1) ' 1 = olAppointmentItem
+
+    With OutlookAppt
+        .Subject = "Follow-up for " & ClientN
+        .Start = DateValue(FollowUpDate) + TimeValue(FollowUpTime)
+        .Duration = 30
+        .Location = "Office or call"
+
+        ' Build HTML
+        Dim htmlBodyStr As String
+        htmlBodyStr = "<html><body>" & _
+                      "<p><b>Client:</b> " & HtmlEncode(ClientN) & "<br>" & _
+                      "<b>Contact:</b> " & HtmlEncode(ContactN) & _
+                      IIf(Len(ContactE) > 0, " (" & HtmlEncode(ContactE) & _
+                          IIf(Len(ContactP) > 0, ", " & HtmlEncode(ContactP), vbNullString) & ")", vbNullString) & "<br>" & _
+                      "<b>Department:</b> " & HtmlEncode(Department) & _
+                      IIf(Len(StdName) > 0, "<br><b>Standard:</b> " & HtmlEncode(StdName), vbNullString) & _
+                      IIf(Len(QNum) > 0, "<br><b>Quote Number:</b> " & HtmlEncode(QNum), vbNullString) & _
+                      "</p>"
+
+        If Len(Trim$(ENQNotes)) > 0 Then
+            htmlBodyStr = htmlBodyStr & "<p><b>Enquiry Notes:</b><br>" & _
+                          HtmlEncode(ENQNotes) & "</p>"
+        End If
+
+        If Len(Trim$(QNotes)) > 0 Then
+            htmlBodyStr = htmlBodyStr & "<p><b>Quote Notes:</b><br>" & _
+                          HtmlEncode(QNotes) & "</p>"
+        End If
+
+        htmlBodyStr = htmlBodyStr & "</body></html>"
+
+        ' Try HTMLBody; fallback to plain .Body if needed
+        On Error Resume Next
+        CallByName OutlookAppt, "HTMLBody", VbLet, htmlBodyStr
+        If Err.Number <> 0 Then
+            Err.Clear
+            Dim plain As String
+            plain = "Client: " & ClientN & vbCrLf & _
+                    "Contact: " & ContactN & IIf(Len(ContactE) > 0, " (" & ContactE & ")", vbNullString) & vbCrLf & _
+                    "Department: " & Department & vbCrLf & _
+                    IIf(Len(StdName) > 0, "Standard: " & StdName & vbCrLf, vbNullString) & _
+                    IIf(Len(QNum) > 0, "Quote Number: " & QNum & vbCrLf, vbNullString) & _
+                    vbCrLf & _
+                    "Enquiry Notes:" & vbCrLf & ENQNotes & vbCrLf & vbCrLf & _
+                    "Quote Notes:" & vbCrLf & QNotes
+            .Body = plain
+        End If
+        On Error GoTo Err_Handler
+
+        .Display
+        .Save
+    End With
+
+CleanExit:
+    On Error Resume Next
+    Set OutlookAppt = Nothing
+    Set OutlookApp = Nothing
+    Exit Sub
+
+Err_Handler:
+    MsgBox "ScheduleFollowUp error " & Err.Number & ": " & Err.Description, vbExclamation
+    Resume CleanExit
+End Sub
+
+
+
+'==========================
+' HELPERS
+'==========================
+Private Function LoadEmailTemplate( _
+    ByVal TemplateName As String, _
+    ByRef toAddr As String, _
+    ByRef ccAddr As String, _
+    ByRef bccAddr As String, _
+    ByRef subj As String, _
+    ByRef bodyHtml As String _
+) As Boolean
+    On Error GoTo ErrHandler
+
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim sql As String
+
+    sql = "SELECT * FROM t_EmailTemplate WHERE TemplateName='" & Replace(TemplateName, "'", "''") & "'"
+
+    Set db = CurrentDb()
+    Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+
+    If rs.EOF Then
+        LoadEmailTemplate = False
+    Else
+        toAddr = Nz(rs!ToTemplate, vbNullString)
+        ccAddr = Nz(rs!CCTemplate, vbNullString)
+        bccAddr = Nz(rs!BCCTemplate, vbNullString)
+        subj = Nz(rs!SubjectTemplate, vbNullString)
+        bodyHtml = Nz(rs!BodyTemplate, vbNullString)
+        LoadEmailTemplate = True
+    End If
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+    Exit Function
+
+ErrHandler:
+    LoadEmailTemplate = False
+    Resume CleanExit
+End Function
+
+Private Function ApplyPairs(ByVal s As String, ParamArray pairs() As Variant) As String
+    Dim i As Long
+    ApplyPairs = Nz(s, vbNullString)
+
+    If (UBound(pairs) - LBound(pairs) + 1) < 2 Then Exit Function
+
+    For i = LBound(pairs) To UBound(pairs) Step 2
+        If i + 1 <= UBound(pairs) Then
+            ApplyPairs = Replace(ApplyPairs, SafeToString(pairs(i)), SafeToString(pairs(i + 1)))
+        End If
+    Next i
+End Function
+
+Private Sub AddAttachmentIfExists(ByVal mailItem As Object, ByVal filePath As String)
+    On Error GoTo ErrHandler
+    If Len(Trim$(Nz(filePath, vbNullString))) = 0 Then Exit Sub
+    If Dir(filePath) = vbNullString Then
+        MsgBox "Attachment file not found: " & filePath, vbExclamation
+        Exit Sub
+    End If
+    mailItem.Attachments.Add filePath
+    Exit Sub
+
+ErrHandler:
+    ' Keep attachment failures non-fatal
+    MsgBox "Attachment error: " & Err.Description, vbExclamation
+End Sub
+
+Private Function EnsureTrailingBackslash(ByVal folderPath As String) As String
+    folderPath = Nz(folderPath, vbNullString)
+    If Len(folderPath) = 0 Then
+        EnsureTrailingBackslash = vbNullString
+    ElseIf Right$(folderPath, 1) = "\" Then
+        EnsureTrailingBackslash = folderPath
+    Else
+        EnsureTrailingBackslash = folderPath & "\"
+    End If
+End Function
+
+Private Function CombineFolderAndFile(ByVal folderPath As String, ByVal fileName As String) As String
+    folderPath = Trim$(Nz(folderPath, vbNullString))
+    fileName = Trim$(Nz(fileName, vbNullString))
+
+    ' Normalise slashes (defensive)
+    folderPath = Replace(folderPath, "/", "\")
+    fileName = Replace(fileName, "/", "\")
+
+    ' Strip any leading "\" from the file part so we don't end up with "C:\path\\file.pdf"
+    Do While Len(fileName) > 0 And Left$(fileName, 1) = "\"
+        fileName = Mid$(fileName, 2)
+    Loop
+
+    If Len(folderPath) = 0 Then
+        CombineFolderAndFile = fileName
+    Else
+        CombineFolderAndFile = EnsureTrailingBackslash(folderPath) & fileName
+    End If
+End Function
+
+Private Function LookupWAFLocation(ByVal wafKey As Variant) As String
+    ' Looks up t_WAFs.WAFLocation for the selected WAF.
+    ' Tries a few common PK field names defensively (so this won’t hard-crash if yours differs).
+    On Error GoTo CleanFail
+
+    Dim v As Variant
+    LookupWAFLocation = vbNullString
+
+    If IsNull(wafKey) Or Len(Trim$(CStr(wafKey))) = 0 Then Exit Function
+
+    If IsNumeric(wafKey) Then
+        ' Most likely
+        v = DLookup("WAFLocation", "t_WAFs", "WAFID=" & CLng(wafKey))
+        If Not IsNull(v) Then LookupWAFLocation = CStr(v): Exit Function
+
+        Err.Clear
+        v = DLookup("WAFLocation", "t_WAFs", "ID=" & CLng(wafKey))
+        If Not IsNull(v) Then LookupWAFLocation = CStr(v): Exit Function
+
+        Err.Clear
+        v = DLookup("WAFLocation", "t_WAFs", "WAFDocID=" & CLng(wafKey))
+        If Not IsNull(v) Then LookupWAFLocation = CStr(v): Exit Function
+    Else
+        ' If your combo is bound to a text key instead of an ID (less likely)
+        Dim k As String
+        k = Replace(CStr(wafKey), "'", "''")
+
+        v = DLookup("WAFLocation", "t_WAFs", "WAFDoc='" & k & "'")
+        If Not IsNull(v) Then LookupWAFLocation = CStr(v): Exit Function
+
+        Err.Clear
+        v = DLookup("WAFLocation", "t_WAFs", "DocFileName='" & k & "'")
+        If Not IsNull(v) Then LookupWAFLocation = CStr(v): Exit Function
+
+        Err.Clear
+        v = DLookup("WAFLocation", "t_WAFs", "DocName='" & k & "'")
+        If Not IsNull(v) Then LookupWAFLocation = CStr(v): Exit Function
+    End If
+
+    Exit Function
+
+CleanFail:
+    ' If a field name above doesn't exist in your table, DLookup will error; we treat as "not found".
+    LookupWAFLocation = vbNullString
+End Function
+
+Private Function GetTempVarValue(ByVal TempVarName As String) As Variant
+    On Error GoTo ErrHandler
+    GetTempVarValue = TempVars(TempVarName)
+    Exit Function
+ErrHandler:
+    GetTempVarValue = Null
+End Function
+
+Private Function ClientRequiresCreditApp(ByVal ClientID As Long) As Boolean
+    ' Interprets field t_Clients.CreditApplication as:
+    '   0 / False / Null  => requires credit app attachment
+    '   non-zero / True   => credit terms exist; no attachment needed
+    Dim v As Variant
+    v = DLookup("CreditApplication", "t_Clients", "ClientID=" & ClientID)
+    ClientRequiresCreditApp = (Nz(v, 0) = 0)
+End Function
+
+Private Function HtmlEncode(ByVal s As String) As String
+    s = Nz(s, vbNullString)
+    s = Replace(s, "&", "&amp;")
+    s = Replace(s, "<", "&lt;")
+    s = Replace(s, ">", "&gt;")
+    s = Replace(s, """", "&quot;")
+    s = Replace(s, "'", "&#39;")
+    s = Replace(s, vbCrLf, "<br>")
+    HtmlEncode = s
+End Function
+
+Private Function ControlExists(ByVal frm As Access.Form, ByVal ControlName As String) As Boolean
+    On Error GoTo ErrHandler
+    Dim tmp As Variant
+    tmp = frm.Controls(ControlName).Name
+    ControlExists = True
+    Exit Function
+ErrHandler:
+    ControlExists = False
+End Function
+
+Private Function SafeCtrlValue(ByVal frm As Access.Form, ByVal ControlName As String) As Variant
+    On Error GoTo ErrHandler
+    If Len(Trim$(ControlName)) = 0 Then
+        SafeCtrlValue = Null
+    ElseIf ControlExists(frm, ControlName) Then
+        SafeCtrlValue = frm.Controls(ControlName).value
+    Else
+        SafeCtrlValue = Null
+    End If
+    Exit Function
+ErrHandler:
+    SafeCtrlValue = Null
+End Function
+
+Private Function SafeCtrlText(ByVal frm As Access.Form, ByVal ControlName As String) As String
+    SafeCtrlText = Nz(SafeCtrlValue(frm, ControlName), vbNullString)
+End Function
+
+Private Function SafeCtrlColumnText(ByVal frm As Access.Form, ByVal ControlName As String, ByVal colIndex As Long, ByVal fallback As String) As String
+    On Error GoTo ErrHandler
+    If Len(Trim$(ControlName)) = 0 Then
+        SafeCtrlColumnText = fallback
+        Exit Function
+    End If
+
+    If Not ControlExists(frm, ControlName) Then
+        SafeCtrlColumnText = fallback
+        Exit Function
+    End If
+
+    Dim c As Control
+    Set c = frm.Controls(ControlName)
+
+    ' Combo/list controls support .Column()
+    SafeCtrlColumnText = Nz(c.Column(colIndex), fallback)
+    Exit Function
+
+ErrHandler:
+    SafeCtrlColumnText = fallback
+End Function
+
+Private Function GetControlOrTempVar(ByVal frm As Access.Form, ByVal nameOrKey As String) As Variant
+    ' Attempts to resolve:
+    '   1) a form control with this name, else
+    '   2) TempVars(nameOrKey)
+    On Error GoTo ErrHandler
+
+    If ControlExists(frm, nameOrKey) Then
+        GetControlOrTempVar = frm.Controls(nameOrKey).value
+        Exit Function
+    End If
+
+    GetControlOrTempVar = GetTempVarValue(nameOrKey)
+    Exit Function
+
+ErrHandler:
+    GetControlOrTempVar = Null
+End Function

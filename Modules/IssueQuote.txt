@@ -1,0 +1,325 @@
+Option Compare Database
+Option Explicit
+Public Sub SetDepartmentAndStandardsFromSpecimens()
+
+    ' === Handle ApertOrient uniqueness ===
+    Dim apertRs As DAO.Recordset
+    Dim apertCol As Collection
+    Dim apertCount As Long
+    Dim apertVal As Variant
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim sql As String
+    Dim QuoteID As Long
+    Dim TestID As Variant
+    Dim testIDs As Collection
+    Dim key As Variant
+    Dim q As Integer
+    Dim ID As Integer
+    Dim suffix As String
+    Dim suffix2 As String
+    Dim WAFLocation As String
+    Dim itemCount As Integer
+
+    Set db = CurrentDb
+    Set apertCol = New Collection
+    
+    sql = "SELECT DISTINCT ApertOrient FROM t_Specimen WHERE QuoteID = " & TempVars("QuoteID")
+    Set apertRs = db.OpenRecordset(sql) '& " AND NOT ApertOrient IS NULL"
+    
+    Do While Not apertRs.EOF
+        If Not IsNull(apertRs!ApertOrient) Then
+            On Error Resume Next
+            apertCol.Add apertRs!ApertOrient, CStr(apertRs!ApertOrient)
+            If Err.Number <> 0 Then
+                ' Probably a duplicate key – ignore it
+                Err.Clear
+            End If
+            On Error GoTo EHandler
+        End If
+        apertRs.MoveNext
+    Loop
+
+    On Error GoTo EHandler
+    
+    apertRs.Close
+    Set apertRs = Nothing
+    
+    apertCount = apertCol.Count
+    
+    If apertCount = 0 Then
+        TempVars!TestOrientation = Null
+    ElseIf apertCount = 1 Then
+        apertVal = Nz(DLookup("Orientation", "t_Orders", "QuoteID = " & TempVars!QuoteID), 0)
+        TempVars!TestOrientation = Nz(DLookup("Aperture", "x_Apertures", "ApertureID = " & apertVal), 0)
+    Else
+        TempVars!TestOrientation = "Multiple"
+    End If
+
+    
+    If IsNull(TempVars("TestID")) Or TempVars("TestID") = "" Then
+    
+    suffix2 = "Multiple Standards"
+    
+    Else
+    
+    ID = DLookup("Standard", "t_AccreditedTests", "TestID = " & TempVars("TestID"))
+    suffix2 = DLookup("stdNumber", "t_Standards", "ID_PurchasedStandards = " & ID)
+    suffix = suffix2 & ":" & DLookup("stdYear", "t_Standards", "stdNumber = " & "'" & suffix2 & "'")
+    suffix2 = suffix & " - " & DLookup("stdTitle", "t_Standards", "ID_PurchasedStandards = " & ID)
+
+    End If
+
+    Set db = CurrentDb
+    Set testIDs = New Collection
+
+    QuoteID = TempVars!QuoteID
+
+    ' Get all TestIDs for the current QuoteID
+    sql = "SELECT DISTINCT TestID FROM t_Specimen WHERE QuoteID = " & QuoteID & " AND NOT TestID IS NULL"
+    Set rs = db.OpenRecordset(sql)
+
+    On Error Resume Next ' Ignore duplicate keys
+    Do While Not rs.EOF
+        If Not IsNull(rs!TestID) Then
+            testIDs.Add rs!TestID, CStr(rs!TestID)
+        End If
+        rs.MoveNext
+    Loop
+    On Error GoTo EHandler ' Restore error handling
+
+    rs.Close
+    Set rs = Nothing
+
+    itemCount = testIDs.Count
+
+ If itemCount = 0 Then
+        TempVars!DeptName = Null
+        TempVars!TestStandards = Null
+    ElseIf itemCount = 1 Then
+       ' testID = testIDs(1)
+
+        ' Get department from Dept TempVar
+        q = DLookup("stdDepartment", "t_Standards", "ID_PurchasedStandards = " & ID)
+        TempVars!DeptName = DLookup("Department", "x_Departments", "ID = " & q)
+
+        ' Get test standard for the single TestID
+        TempVars!TestStandards = suffix2
+    Else
+        TempVars!DeptName = "Multiple"
+        TempVars!TestStandards = "Multiple"
+    End If
+
+
+EHandler:
+    'MsgBox "An error occurred: " & Err.Description, vbCritical
+
+End Sub
+
+Public Sub SaveStragglers()
+
+DoCmd.RunCommand acCmdSaveRecord
+
+End Sub
+
+Public Sub CreateQuote()
+
+DoCmd.Save
+
+TempVars("ContactName") = DLookup("ConcatName", "t_Contacts", "ContactID = " & Forms!MAIN_FORM!subContentFrame.Form!ContactID.value)
+TempVars("ContactEmail") = DLookup("EmailAddress", "t_Contacts", "ContactID = " & Forms!MAIN_FORM!subContentFrame.Form!ContactID.value)
+TempVars("ClientCODE") = DLookup("ClientCODE", "t_Clients", "ClientID = " & Forms!MAIN_FORM!subContentFrame.Form!ClientID.value)
+TempVars("Version") = DLookup("VNumber", "t_Quotations", "QuoteID = " & Forms!MAIN_FORM!subContentFrame.Form!QuoteID.value)
+'TempVars("EuroClass") = DLookup("EuroClass", "x_EuroClassOptions", "EuroClassID = " & Nz(Forms!MAIN_FORM!subContentFrame.Form!Euroclass.Value), 0)
+
+
+SetDepartmentAndStandardsFromSpecimens
+
+'TempVars("TandCs") = DLookup("RefCode", "x_QMSDocRefs", "QMSDocID = " & 1)
+
+'Orientation
+
+DoEvents
+
+On Error GoTo ErrorHandler
+
+    Dim xlApp As Object
+    Dim xlWorkbook As Object
+    Dim xlSheet As Object
+    Dim TemplatePath As String
+    Dim FolderName As String
+    Dim folderPath As String
+    Dim saveFilePath As String
+    Dim xlWB As Object
+    Dim rs As DAO.Recordset
+    Dim sql As String
+
+    ' === Start Excel FIRST ===
+    Set xlApp = CreateObject("Excel.Application")
+    xlApp.DisplayAlerts = False
+    xlApp.Visible = True
+
+    ' === Define the template path ===
+    TemplatePath = TempVars("QuoteLocation")
+
+    ' === Open the template as a new workbook ===
+    Set xlWorkbook = xlApp.Workbooks.Add(TemplatePath)
+    Set xlWB = xlWorkbook ' Just for naming consistency — both point to same workbook
+
+    ' === Reference a sheet (if needed) ===
+    Set xlSheet = xlWorkbook.Sheets("Imported Data")
+
+    ' === Build folder name from form ===
+    
+    Dim standardName As String
+    
+    If Forms!MAIN_FORM!subContentFrame.Form!Standard = "" Then
+        standardName = "Multiple Standards"
+    Else
+        standardName = Forms!MAIN_FORM!subContentFrame.Form!Standard
+    End If
+    
+    FolderName = Forms!MAIN_FORM!subContentFrame.Form!QuoteNumber & " - " & _
+                 Forms!MAIN_FORM!subContentFrame.Form!Client & " - " & _
+                 Nz(standardName, "Multiple")
+    
+    ' Remove carriage returns / line feeds
+    FolderName = Replace(Replace(FolderName, vbCr, ""), vbLf, "")
+    
+    ' Remove illegal file/folder characters
+    FolderName = CleanFileName(FolderName)
+    
+    folderPath = TempVars("QuoteSaveLocation") & "\" & FolderName & "\"
+    
+    If Dir(folderPath, vbDirectory) = "" Then
+        MkDir folderPath
+    End If
+
+    saveFilePath = folderPath & TempVars("QNum") & " " & TempVars("Version") & ".xlsx"
+
+    ' === Grab quotation data ===
+    sql = "SELECT * FROM t_Quotations WHERE QuoteID = " & Forms!MAIN_FORM!subContentFrame.Form!QuoteID
+    Set rs = CurrentDb.OpenRecordset(sql)
+
+    If Not rs.EOF Then
+        Dim fld As DAO.Field
+        For Each fld In rs.fields
+            On Error Resume Next
+            xlWB.names(fld.Name).RefersToRange.value = fld.value
+            On Error GoTo 0
+        Next fld
+    Else
+        MsgBox "Quotation not found.", vbExclamation
+    End If
+    
+' === Lookup Related Data and import the address data for the Contact ===
+
+sql = ""
+
+Dim addressLines(1 To 6) As String
+
+sql = "SELECT a.Address1Line1, a.Address1Line2, a.Address1Line3, a.Address1Line4, a.Address1Line5, a.Address1Line6 " & _
+      "FROM ((t_Quotations q " & _
+      "INNER JOIN t_Enquiries e ON q.EnquiryID = e.EnquiryID) " & _
+      "INNER JOIN t_Contacts ct ON e.ContactID = ct.ContactID) " & _
+      "INNER JOIN t_Addresses a ON ct.AddressID = a.AddressID " & _
+      "WHERE q.QuoteID = " & Forms!MAIN_FORM!subContentFrame.Form!QuoteID
+
+Set rs = CurrentDb.OpenRecordset(sql)
+
+If Not rs.EOF Then
+    Dim i As Integer
+    For i = 1 To 6
+        On Error Resume Next
+        xlWB.names("Address1Line" & i).RefersToRange.value = Nz(rs.fields("Address1Line" & i).value, "")
+        On Error GoTo 0
+    Next i
+End If
+
+'#### Add user fields
+
+Dim varNames As Variant
+Dim varValues As Variant
+i = 0
+
+varNames = Array("USERID", "USER", "USERtel", "USERemail", "USERjob", "SecPass", "QuoteClient", "ClientCODE", "ContactName", "ContactEmail", "DeptName", "TestStandards", "TandCs", "EuroClass")
+varValues = Array(TempVars("USERID"), TempVars("USER"), TempVars("USERtel"), TempVars("USERemail"), TempVars("USERjob"), TempVars("SecPass"), TempVars("QuoteClient"), TempVars("ClientCODE"), TempVars("ContactName"), TempVars("ContactEmail"), TempVars("DeptName"), TempVars("TestStandards"), TempVars("TandCs"), TempVars("EuroClass"))
+
+For i = LBound(varNames) To UBound(varNames)
+    On Error Resume Next
+    xlWB.names(varNames(i)).RefersToRange.value = varValues(i)
+    On Error GoTo 0
+Next i
+
+Dim rsSpecimen As DAO.Recordset
+Dim sheetSpecimen As Object
+Dim col As Integer, row As Long
+
+' === Get specimen records for current QuoteID ===
+Set rsSpecimen = CurrentDb.OpenRecordset( _
+    "SELECT * FROM t_Specimen WHERE QuoteID = " & TempVars!QuoteID, dbOpenSnapshot)
+
+If Not rsSpecimen.EOF Then
+    ' === Add new sheet (or reference existing one if named) ===
+    On Error Resume Next
+    Set sheetSpecimen = xlWB.Sheets("Specimens")
+    If sheetSpecimen Is Nothing Then
+        Set sheetSpecimen = xlWB.Sheets.Add(after:=xlWB.Sheets(xlWB.Sheets.Count))
+        sheetSpecimen.Name = "Specimens"
+    End If
+    On Error GoTo 0
+
+    ' === Write column headers ===
+    row = 2
+    For col = 0 To rsSpecimen.fields.Count - 1
+        sheetSpecimen.Cells(row, col + 1).value = rsSpecimen.fields(col).Name
+    Next col
+
+    ' === Write data rows ===
+    row = 2
+    Do Until rsSpecimen.EOF
+        For col = 0 To rsSpecimen.fields.Count - 1
+            sheetSpecimen.Cells(row, col + 1).value = Nz(rsSpecimen.fields(col).value, 0)
+        Next col
+        row = row + 1
+        rsSpecimen.MoveNext
+    Loop
+End If
+
+rsSpecimen.Close
+Set rsSpecimen = Nothing
+Set sheetSpecimen = Nothing
+
+    ' Save the new workbook to the target folder
+    xlWorkbook.SaveAs saveFilePath
+
+    ' Clean up
+    Set xlSheet = Nothing
+    Set xlWorkbook = Nothing
+    Set xlApp = Nothing
+
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "An error occurred: " & Err.Description, vbCritical
+    If Not xlApp Is Nothing Then
+        xlApp.DisplayAlerts = True
+        xlApp.Quit
+    End If
+    Set xlSheet = Nothing
+    Set xlWorkbook = Nothing
+    Set xlApp = Nothing
+
+End Sub
+
+Function CleanFileName(strIn As String) As String
+    Dim regEx As Object
+    Set regEx = CreateObject("VBScript.RegExp")
+    
+    With regEx
+        .Pattern = "[\/:*?""<>|]" ' illegal characters for Windows
+        .Global = True
+    End With
+
+    CleanFileName = Trim(regEx.Replace(strIn, ""))
+End Function

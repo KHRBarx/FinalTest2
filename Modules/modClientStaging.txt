@@ -1,0 +1,206 @@
+Option Compare Database
+Option Explicit
+
+Public Sub LoadClientStaging(ByVal ClientID As Long)
+    ' Wipes & reloads both staging tables for the selected client
+    Dim db As DAO.Database
+    Set db = CurrentDb
+
+    db.Execute "DELETE FROM zt_Address_staging WHERE ClientID=" & ClientID, dbFailOnError
+    db.Execute "DELETE FROM zt_Contact_staging WHERE ClientID=" & ClientID, dbFailOnError
+
+    ' Pull current BE rows into staging (adjust table/field names to your schema)
+db.Execute _
+    "INSERT INTO zt_Address_staging (" & _
+        "AddressID, ClientID, " & _
+        "Address1Line1, Address1Line2, Address1Line3, Address1Line4, Address1Line5, Address1Line6, [Type], " & _
+        "Account, Deliveries, HeadOffice) " & _
+    "SELECT " & _
+        "AddressID, ClientID, " & _
+        "Address1Line1, Address1Line2, Address1Line3, Address1Line4, Address1Line5, Address1Line6, [Type], " & _
+        "Accounts, Deliveries, HeadOffice " & _
+    "FROM t_Addresses WHERE ClientID=" & ClientID, dbFailOnError
+
+    db.Execute _
+        "INSERT INTO zt_Contact_staging (ContactID, AddressID, ClientID, ConCatName, JobTitle, EmailAddress, PrimaryNumber, PhoneExt, Department, ForeName, Surname, MiddleName, Title, PostNominal, SecondaryNumber, TertiaryNumber, SecondaryEmail, Notes) " & _
+        "SELECT ContactID, AddressID, ClientID, ConCatName, JobTitle, EmailAddress, PrimaryNumber, PhoneExt, Department, ForeName, Surname, MiddleName, Title, PostNominal, SecondaryNumber, TertiaryNumber, SecondaryEmail, Notes " & _
+        "FROM t_Contacts WHERE ClientID=" & ClientID, dbFailOnError
+End Sub
+
+Public Sub MarkDirtyCurrent(FormRef As Access.Form)
+    ' Call in control AfterUpdate events to set IsDirty=True on edits of existing rows
+    If Nz(FormRef!IsNew, False) = False And Nz(FormRef!IsDeleted, False) = False Then
+        FormRef!IsDirty = True
+    End If
+End Sub
+
+Public Sub SaveContactsForClient(ByVal ClientID As Long)
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim rsIns As DAO.Recordset
+
+    Set db = CurrentDb
+
+    On Error GoTo ErrHandler
+    DAO.DBEngine.BeginTrans
+
+'    ' Deletes
+'    db.Execute _
+'        "DELETE FROM t_Contacts WHERE ContactID IN " & _
+'        "(SELECT ContactID FROM zt_Contact_staging " & _
+'        " WHERE ClientID=" & ClientID & " AND IsDeleted=True AND ContactID Is Not Null)", dbFailOnError
+
+    ' Updates
+    db.Execute _
+        "UPDATE t_Contacts INNER JOIN zt_Contact_staging AS Z ON t_Contacts.ContactID=Z.ContactID " & _
+        "SET t_Contacts.AddressID=Z.AddressID, " & _
+            "t_Contacts.JobTitle=Z.JobTitle, " & _
+            "t_Contacts.EmailAddress=Z.EmailAddress, " & _
+            "t_Contacts.PrimaryNumber=Z.PrimaryNumber, " & _
+            "t_Contacts.PhoneExt=Z.PhoneExt, " & _
+            "t_Contacts.Department=Z.Department, " & _
+            "t_Contacts.Forename=Z.Forename, " & _
+            "t_Contacts.Surname=Z.Surname, " & _
+            "t_Contacts.MiddleName=Z.MiddleName, " & _
+            "t_Contacts.Title=Z.Title, " & _
+            "t_Contacts.PostNominal=Z.PostNominal, " & _
+            "t_Contacts.SecondaryNumber=Z.SecondaryNumber, " & _
+            "t_Contacts.TertiaryNumber=Z.TertiaryNumber, " & _
+            "t_Contacts.SecondaryEmail=Z.SecondaryEmail, " & _
+            "t_Contacts.Notes=Z.Notes " & _
+            "WHERE Z.ClientID=" & ClientID & " AND Z.IsDirty=True", dbFailOnError
+    ' Inserts
+    Set rs = db.OpenRecordset( _
+        "SELECT * FROM zt_Contact_staging " & _
+        "WHERE ClientID=" & ClientID & " AND IsNew=True AND IsDeleted=False", dbOpenDynaset)
+
+    Do While Not rs.EOF
+        Set rsIns = db.OpenRecordset("t_Contacts", dbOpenDynaset)
+        rsIns.AddNew
+        rsIns!AddressID = rs!AddressID
+        rsIns!ClientID = rs!ClientID
+        rsIns!JobTitle = rs!JobTitle
+        rsIns!EmailAddress = rs!EmailAddress
+        rsIns!PrimaryNumber = rs!PrimaryNumber
+        rsIns!PhoneExt = rs!PhoneExt
+        rsIns!Department = rs!Department
+        rsIns!Forename = rs!Forename
+        rsIns!Surname = rs!Surname
+        rsIns!MiddleName = rs!MiddleName
+        rsIns!Title = rs!Title
+        rsIns!PostNominal = rs!PostNominal
+        rsIns!SecondaryNumber = rs!SecondaryNumber
+        rsIns!TertiaryNumber = rs!TertiaryNumber
+        rsIns!SecondaryEmail = rs!SecondaryEmail
+        rsIns!Notes = rs!Notes
+        rsIns.Update
+
+        rs.Edit
+        rs!ContactID = rsIns!ContactID
+        rs!IsNew = False
+        rs!IsDirty = False
+        rs.Update
+
+        rsIns.Close
+        Set rsIns = Nothing
+        rs.MoveNext
+    Loop
+    rs.Close
+    Set rs = Nothing
+
+    ' Clear flags in staging
+    db.Execute "UPDATE zt_Contact_staging SET IsDirty=False WHERE ClientID=" & ClientID, dbFailOnError
+
+    DAO.DBEngine.CommitTrans
+    Exit Sub
+
+ErrHandler:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    If Not rsIns Is Nothing Then rsIns.Close
+    DAO.DBEngine.Rollback   ' safe even if no transaction is active
+    On Error GoTo 0
+    Err.Raise Err.Number, Err.Source, Err.Description
+End Sub
+
+
+Public Sub SaveAddressesForClient(ByVal ClientID As Long)
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim rsIns As DAO.Recordset
+
+    Set db = CurrentDb
+
+    On Error GoTo ErrHandler
+    DAO.DBEngine.BeginTrans
+
+    ' Deletes
+    db.Execute _
+        "DELETE FROM t_Addresses WHERE AddressID IN " & _
+        "(SELECT AddressID FROM zt_Address_staging " & _
+        " WHERE ClientID=" & ClientID & " AND IsDeleted=True AND AddressID Is Not Null)", dbFailOnError
+
+    ' Updates  (edit the field names to your exact ones)
+db.Execute _
+    "UPDATE t_Addresses INNER JOIN zt_Address_staging AS Z " & _
+    "ON t_Addresses.AddressID = Z.AddressID " & _
+    "SET " & _
+        "t_Addresses.[Address1Line1] = Z.[Address1Line1], " & _
+        "t_Addresses.[Address1Line2] = Z.[Address1Line2], " & _
+        "t_Addresses.[Address1Line3] = Z.[Address1Line3], " & _
+        "t_Addresses.[Address1Line4] = Z.[Address1Line4], " & _
+        "t_Addresses.[Address1Line5] = Z.[Address1Line5], " & _
+        "t_Addresses.[Address1Line6] = Z.[Address1Line6], " & _
+        "t_Addresses.[Type]        = Z.[Type], " & _
+        "t_Addresses.[Accounts]     = Z.[Accounts], " & _
+        "t_Addresses.[Deliveries]  = Z.[Deliveries], " & _
+        "t_Addresses.[HeadOffice]  = Z.[HeadOffice] " & _
+    "WHERE Z.ClientID=" & ClientID & " AND Z.IsDirty=True", dbFailOnError
+
+    ' Inserts
+    Set rs = db.OpenRecordset( _
+        "SELECT * FROM zt_Address_staging " & _
+        "WHERE ClientID=" & ClientID & " AND IsNew=True AND IsDeleted=False", dbOpenDynaset)
+
+    Do While Not rs.EOF
+        Set rsIns = db.OpenRecordset("t_Addresses", dbOpenDynaset)
+        rsIns.AddNew
+        rsIns!ClientID = ClientID
+        rsIns![Address1Line1] = rs![Address1Line1]
+        rsIns![Address1Line2] = rs![Address1Line2]
+        rsIns![Address1Line3] = rs![Address1Line3]
+        rsIns![Address1Line4] = rs![Address1Line4]
+        rsIns![Address1Line5] = rs![Address1Line5]
+        rsIns![Address1Line6] = rs![Address1Line6]
+        rsIns![Type] = rs![Type]
+        rsIns![Accounts] = rs![Accounts]
+        rsIns![Deliveries] = rs![Deliveries]
+        rsIns![HeadOffice] = rs![HeadOffice]
+        rsIns.Update
+
+        rs.Edit
+        rs!AddressID = rsIns!AddressID
+        rs!IsNew = False
+        rs!IsDirty = False
+        rs.Update
+
+        rsIns.Close
+        Set rsIns = Nothing
+        rs.MoveNext
+    Loop
+    rs.Close
+    Set rs = Nothing
+
+    db.Execute "UPDATE zt_Address_staging SET IsDirty=False WHERE ClientID=" & ClientID, dbFailOnError
+
+    DAO.DBEngine.CommitTrans
+    Exit Sub
+
+ErrHandler:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    If Not rsIns Is Nothing Then rsIns.Close
+    DAO.DBEngine.Rollback
+    On Error GoTo 0
+    Err.Raise Err.Number, Err.Source, Err.Description
+End Sub

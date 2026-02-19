@@ -1,0 +1,158 @@
+Option Compare Database
+
+Public Sub ApplyQuoteIntro(ByVal doc As Object, ByVal rsH As DAO.Recordset, ByVal QuoteKey As String)
+
+    Dim Formality As Long
+    Dim introKey As String
+    Dim introText As String
+    Dim ServiceLabel As String
+    Dim v As Variant
+
+    'Get Formality (defaulting to 1 only if the field is absent)
+    If RsFieldExists(rsH, "Formality") Then
+        Formality = Nz(rsH.fields("Formality").value, 1)
+    Else
+        Formality = 1
+    End If
+
+    'Choose the TextKey in t_QuoteText
+    If Formality = 2 Then
+        introKey = "IntroUnaccredited"
+    Else
+        introKey = "IntroAccredited"
+    End If
+
+    'Pull intro text from table (NO fallback)
+    v = DLookup("TextValue", "t_QuoteText", "TextKey='" & Replace(introKey, "'", "''") & "'")
+    If IsNull(v) Or Len(CStr(v)) = 0 Then
+        Err.Raise vbObjectError + 7401, "ApplyQuoteIntro", _
+                  "Missing/blank t_QuoteText.TextValue for TextKey='" & introKey & "'."
+    End If
+    introText = CStr(v)
+
+    'Pull service label from table (NO fallback)
+    v = DLookup("ServiceLabel", "t_QuoteService", "QuoteKey='" & Replace(QuoteKey, "'", "''") & "'")
+    If IsNull(v) Or Len(CStr(v)) = 0 Then
+        Err.Raise vbObjectError + 7402, "ApplyQuoteIntro", _
+                  "Missing/blank t_QuoteService.ServiceLabel for QuoteKey='" & QuoteKey & "'."
+    End If
+    ServiceLabel = CStr(v)
+
+    'Inject and write
+    introText = Replace(introText, "{SERVICE}", ServiceLabel)
+    
+    'Add a blank line before and after (or just a newline if you prefer)
+    introText = vbCrLf & introText & vbCrLf
+    
+    SetCCTextIfExists doc, "QuoteIntro", introText
+
+End Sub
+
+Private Function RsFieldExists(ByVal rs As DAO.Recordset, ByVal fieldName As String) As Boolean
+    On Error GoTo EH
+    Dim tmp As Variant
+    tmp = rs.fields(fieldName).value
+    RsFieldExists = True
+    Exit Function
+EH:
+    RsFieldExists = False
+End Function
+
+Private Sub SetCCTextIfExists(ByVal doc As Object, ByVal tagName As String, ByVal valueText As String)
+    Dim cc As Object
+    Set cc = GetCCByTag(doc, tagName)
+    If cc Is Nothing Then Exit Sub
+    UnlockCC cc
+    cc.Range.text = valueText
+End Sub
+
+Private Function GetCCByTag(doc As Object, ByVal tagName As String) As Object
+    On Error Resume Next
+
+    Dim want As String: want = LCase$(tagName)
+    Dim cc As Object
+
+    For Each cc In doc.ContentControls
+        If LCase$(Nz(cc.Tag, "")) = want Or LCase$(Nz(cc.Title, "")) = want Then
+            Set GetCCByTag = cc
+            Exit Function
+        End If
+    Next cc
+
+    Set cc = FindCCInShapes(doc.shapes, want)
+    If Not cc Is Nothing Then
+        Set GetCCByTag = cc
+        Exit Function
+    End If
+
+    Dim sec As Object, hf As Object, idx As Long
+    For Each sec In doc.Sections
+        For idx = 1 To 3
+            Set hf = sec.headers(idx)
+            If Not hf Is Nothing Then
+                For Each cc In hf.Range.ContentControls
+                    If LCase$(Nz(cc.Tag, "")) = want Or LCase$(Nz(cc.Title, "")) = want Then
+                        Set GetCCByTag = cc
+                        Exit Function
+                    End If
+                Next cc
+
+                Set cc = FindCCInShapes(hf.shapes, want)
+                If Not cc Is Nothing Then
+                    Set GetCCByTag = cc
+                    Exit Function
+                End If
+            End If
+
+            Set hf = sec.Footers(idx)
+            If Not hf Is Nothing Then
+                For Each cc In hf.Range.ContentControls
+                    If LCase$(Nz(cc.Tag, "")) = want Or LCase$(Nz(cc.Title, "")) = want Then
+                        Set GetCCByTag = cc
+                        Exit Function
+                    End If
+                Next cc
+
+                Set cc = FindCCInShapes(hf.shapes, want)
+                If Not cc Is Nothing Then
+                    Set GetCCByTag = cc
+                    Exit Function
+                End If
+            End If
+        Next idx
+    Next sec
+
+    Set GetCCByTag = Nothing
+End Function
+
+Private Function FindCCInShapes(ByVal shapes As Object, ByVal wantLower As String) As Object
+    On Error Resume Next
+    Dim shp As Object, cc As Object
+
+    If shapes Is Nothing Then Exit Function
+
+    For Each shp In shapes
+        If shp.TextFrame.HasText Then
+            For Each cc In shp.TextFrame.TextRange.ContentControls
+                If LCase$(Nz(cc.Tag, "")) = wantLower Or LCase$(Nz(cc.Title, "")) = wantLower Then
+                    Set FindCCInShapes = cc
+                    Exit Function
+                End If
+            Next cc
+        End If
+    Next shp
+End Function
+
+Private Sub UnlockCC(cc As Object)
+    On Error Resume Next
+    cc.LockContentControl = False
+    cc.LockContents = False
+End Sub
+
+Public Function GetQuoteText(ByVal TextKey As String, Optional ByVal fallback As String = vbNullString) As String
+    GetQuoteText = Nz(DLookup("TextValue", "t_QuoteText", "TextKey='" & Replace(TextKey, "'", "''") & "'"), fallback)
+End Function
+
+Public Function GetServiceLabel(ByVal QuoteKey As String, Optional ByVal fallback As String = vbNullString) As String
+    GetServiceLabel = Nz(DLookup("ServiceLabel", "t_QuoteService", "QuoteKey='" & Replace(QuoteKey, "'", "''") & "'"), fallback)
+End Function

@@ -1,0 +1,105 @@
+Option Compare Database
+Option Explicit
+
+Public Sub Import_All_FromRepo_OBJECT_DETAILS()
+    Const ROOT As String = "C:\Repos\access-app-source-test\access_src\OBJECT_DETAILS"
+    Dim logPath As String
+    logPath = ROOT & "\_IMPORT_LOG_" & Format(Now, "yyyymmdd_hhnnss") & ".txt"
+
+    CloseAllOpenObjects
+    WriteLog logPath, "=== IMPORT START " & Now & " ==="
+    WriteLog logPath, "Root: " & ROOT
+
+    ImportFolder ROOT & "\Modules", acModule, logPath
+    ImportFolder ROOT & "\Forms", acForm, logPath
+    ImportFolder ROOT & "\Reports", acReport, logPath
+    ImportFolder ROOT & "\Queries", acQuery, logPath
+
+    WriteLog logPath, "Compiling all modules..."
+    On Error Resume Next
+    DoCmd.RunCommand acCmdCompileAndSaveAllModules
+    On Error GoTo 0
+
+    WriteLog logPath, "=== IMPORT END " & Now & " ==="
+    MsgBox "Import finished. Log: " & logPath, vbInformation
+End Sub
+
+Private Sub ImportFolder(ByVal folderPath As String, ByVal objType As AcObjectType, ByVal logPath As String)
+    Dim f As String, objName As String, fullPath As String
+
+    f = Dir$(folderPath & "\*.txt", vbNormal)
+    If Len(f) = 0 Then
+        WriteLog logPath, "No .txt files found in: " & folderPath
+        Exit Sub
+    End If
+
+    Do While Len(f) > 0
+        objName = Left$(f, Len(f) - 4)
+        fullPath = folderPath & "\" & f
+
+        ' Close if open
+        CloseObjectIfOpen objType, objName
+        
+        'skip this module
+        If objType = acModule Then
+            If objName = "modVCS_Import" Then
+                WriteLog logPath, "SKIP: Module [modVCS_Import] (self-import protection)"
+                GoTo NextFile
+            End If
+        End If
+
+        ' Delete existing (ignore errors if it doesn't exist)
+        On Error Resume Next
+        DoCmd.DeleteObject objType, objName
+        Err.Clear
+        On Error GoTo 0
+
+        ' Import
+        On Error GoTo ImportErr
+        Application.LoadFromText objType, objName, fullPath
+        WriteLog logPath, "Imported: " & ObjTypeName(objType) & " [" & objName & "]"
+        On Error GoTo 0
+
+NextFile:
+        f = Dir$()
+    Loop
+    Exit Sub
+
+ImportErr:
+    WriteLog logPath, "ERROR importing " & ObjTypeName(objType) & " [" & objName & "]: " & Err.Number & " - " & Err.Description
+    Resume NextFile
+End Sub
+
+Private Sub CloseAllOpenObjects()
+    On Error Resume Next
+    DoCmd.Close acForm, , acSaveNo
+    DoCmd.Close acReport, , acSaveNo
+End Sub
+
+Private Sub CloseObjectIfOpen(ByVal objType As AcObjectType, ByVal objName As String)
+    On Error Resume Next
+    Select Case objType
+        Case acForm
+            If SysCmd(acSysCmdGetObjectState, acForm, objName) <> 0 Then DoCmd.Close acForm, objName, acSaveNo
+        Case acReport
+            If SysCmd(acSysCmdGetObjectState, acReport, objName) <> 0 Then DoCmd.Close acReport, objName, acSaveNo
+    End Select
+End Sub
+
+Private Sub WriteLog(ByVal logPath As String, ByVal line As String)
+    Dim ff As Integer
+    ff = FreeFile
+    Open logPath For Append As #ff
+    Print #ff, line
+    Close #ff
+End Sub
+
+Private Function ObjTypeName(ByVal objType As AcObjectType) As String
+    Select Case objType
+        Case acForm: ObjTypeName = "Form"
+        Case acReport: ObjTypeName = "Report"
+        Case acModule: ObjTypeName = "Module"
+        Case acQuery: ObjTypeName = "Query"
+        Case Else: ObjTypeName = CStr(objType)
+    End Select
+End Function

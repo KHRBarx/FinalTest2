@@ -1,0 +1,146 @@
+Option Compare Database
+Option Explicit
+
+' === Run this ===
+Public Sub AuditVersionTags_Auto()
+    Dim frm As Form
+    Set frm = ResolveQuotationsForm()
+    If frm Is Nothing Then
+        MsgBox "Open MAIN_FORM (Form View) so the subform is loaded, then run again.", vbExclamation
+        Exit Sub
+    End If
+    AuditVersionTags_For frm
+End Sub
+
+' === Core audit (same logic as before, but takes a Form argument) ===
+Public Sub AuditVersionTags_For(frm As Form)
+    Dim c As Control, tagText As String, fld As String
+    Dim db As DAO.Database, t As DAO.TableDef, hasField As Boolean
+
+    Set db = CurrentDb
+    Set t = db.TableDefs("t_Quotations")
+
+    Debug.Print "— Version field tag audit — (" & frm.Name & ")"
+    For Each c In frm.Controls
+        Select Case c.ControlType
+            Case acTextBox, acComboBox, acCheckBox
+                tagText = Trim$(Nz(c.Tag, ""))
+                If Len(tagText) = 0 Then
+                    If Left$(LCase$(c.Name), 1) = "v" _
+                       And (InStr(1, c.Name, "Price", vbTextCompare) Or InStr(1, c.Name, "Date", vbTextCompare)) Then
+                        Debug.Print "No Tag set:", c.Name
+                    End If
+                Else
+                    fld = Trim$(Split(tagText, "|")(0)) ' part before optional "|ro"
+                    If Left$(LCase$(fld), 1) = "v" Then
+                        hasField = FieldExistsIn(t, fld)
+                        If Not hasField Then
+                            Debug.Print "Tag points to missing field:", c.Name, "Tag=" & tagText
+                        End If
+                    End If
+                End If
+        End Select
+    Next
+    Debug.Print "— Done —"
+End Sub
+
+' === Helper: find the subform regardless of nesting ===
+Private Function ResolveQuotationsForm() As Form
+    Dim f As Access.Form
+    Dim Top As Access.Form, c As Control
+
+    ' 1) If f_Quotations is open standalone, use it
+    On Error Resume Next
+    Set f = Forms("f_Quotations")
+    On Error GoTo 0
+    If Not f Is Nothing Then
+        Set ResolveQuotationsForm = f
+        Exit Function
+    End If
+
+    ' 2) Try the expected host: MAIN_FORM -> subContentFrame
+    On Error Resume Next
+    If SysCmd(acSysCmdGetObjectState, acForm, "MAIN_FORM") <> 0 Then
+        If ControlExists(Forms("MAIN_FORM"), "subContentFrame") Then
+            Set f = Forms("MAIN_FORM")("subContentFrame").Form   ' <- Form object of the subform
+        End If
+    End If
+    On Error GoTo 0
+    If Not f Is Nothing Then
+        If LCase$(f.Name) = "f_quotations" Then
+            Set ResolveQuotationsForm = f
+            Exit Function
+        End If
+        ' Even if the inner form has been renamed in Access, still return it;
+        ' the audit doesn't require the name to match exactly.
+        Set ResolveQuotationsForm = f
+        Exit Function
+    End If
+
+    ' 3) Brute-force: scan all open forms’ subform controls
+    For Each Top In Forms
+        For Each c In Top.Controls
+            If c.ControlType = acSubform Then
+                On Error Resume Next
+                Set f = c.Form
+                On Error GoTo 0
+                If Not f Is Nothing Then
+                    If LCase$(f.Name) = "f_quotations" Then
+                        Set ResolveQuotationsForm = f
+                        Exit Function
+                    End If
+                End If
+            End If
+        Next
+    Next
+
+    ' Not found
+    Set ResolveQuotationsForm = Nothing
+End Function
+
+Private Function ControlExists(frm As Access.Form, ctlName As String) As Boolean
+    On Error Resume Next
+    Dim tmp As Control
+    Set tmp = frm.Controls(ctlName)
+    ControlExists = (Err.Number = 0)
+    Err.Clear
+End Function
+
+
+Private Function FieldExistsIn(t As DAO.TableDef, ByVal fieldName As String) As Boolean
+    On Error Resume Next
+    Dim dummy As Variant
+    dummy = t.fields(fieldName).OrdinalPosition
+    FieldExistsIn = (Err.Number = 0)
+    Err.Clear
+End Function
+
+Public Sub ListZeroLengthFlags_ADOX()
+    Dim cat As Object ' ADOX.Catalog
+    Dim tbl As Object ' ADOX.Table
+    Dim col As Object ' ADOX.Column
+    Set cat = CreateObject("ADOX.Catalog")
+    cat.ActiveConnection = CurrentProject.Connection
+
+    On Error GoTo CleanFail
+    Set tbl = cat.Tables("zt_Contact_staging")
+
+    For Each col In tbl.Columns
+        On Error Resume Next
+        Dim z As Variant
+        z = col.Properties("Jet OLEDB:Allow Zero Length")
+        If Err.Number = 0 Then
+            'Debug.Print col.name, "AllowZeroLength=", z
+        Else
+            Err.Clear
+        End If
+        On Error GoTo 0
+    Next
+
+CleanExit:
+    Set col = Nothing: Set tbl = Nothing: Set cat = Nothing
+    Exit Sub
+CleanFail:
+    Debug.Print "Could not open table via ADOX. Check name/links."
+    Resume CleanExit
+End Sub

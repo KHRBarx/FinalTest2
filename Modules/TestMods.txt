@@ -1,0 +1,40 @@
+Option Compare Database
+Option Explicit
+Public Sub DiagnoseSubformEditability()
+    Dim sf As Form
+
+    ' Contacts subform
+    Set sf = Forms!MAIN_FORM!subContentFrame.Form!f_ContactCont.Form
+    Debug.Print "=== Contacts subform ==="
+    Debug.Print "RecordSource: "; sf.RecordSource
+    Debug.Print "Updatable?  "; SafeUpdatable(sf)
+    Debug.Print "AllowEdits: "; sf.AllowEdits; "  AllowAdditions: "; sf.AllowAdditions; "  AllowDeletions: "; sf.AllowDeletions
+    Debug.Print "DataEntry:  "; sf.DataEntry
+    Debug.Print "Container Locked/Enabled: "; Forms!MAIN_FORM!subContentFrame.Form!f_ContactCont.Locked; " / "; Forms!MAIN_FORM!subContentFrame.Form!f_ContactCont.enabled
+
+    ' Addresses subform
+    Set sf = Forms!MAIN_FORM!subContentFrame.Form!f_AddressCont.Form
+    Debug.Print "=== Addresses subform ==="
+    Debug.Print "RecordSource: "; sf.RecordSource
+    Debug.Print "Updatable?  "; SafeUpdatable(sf)
+    Debug.Print "AllowEdits: "; sf.AllowEdits; "  AllowAdditions: "; sf.AllowAdditions; "  AllowDeletions: "; sf.AllowDeletions
+    Debug.Print "DataEntry:  "; sf.DataEntry
+    Debug.Print "Container Locked/Enabled: "; Forms!MAIN_FORM!subContentFrame.Form!f_AddressCont.Locked; " / "; Forms!MAIN_FORM!subContentFrame.Form!f_AddressCont.enabled
+End Sub
+
+Private Function SafeUpdatable(frm As Form) As String
+    On Error GoTo Nope
+    SafeUpdatable = IIf(frm.Recordset.updatable, "True", "False")
+    Exit Function
+Nope:
+    SafeUpdatable = "Unknown"
+End Function
+
+Public Sub FixListRowSource()
+    DoCmd.OpenForm "f_Quotations", acDesign
+    With Forms!f_Quotations!lstQuotes
+        .RowSourceType = "Value List"
+        .RowSource = vbNullString
+    End With
+    DoCmd.Close acForm, "f_Quotations", acSaveYes
+End Sub

@@ -1,0 +1,154 @@
+Option Compare Database
+Option Explicit
+Public Sub CalculateListPrice()
+
+    '#### This method works because when the tab group is changed it clears all the variables (UpdateTabPage)
+
+    Dim rs As DAO.Recordset
+    Dim TestID As Long
+    Dim totalCost As Currency
+    Dim cost As Double
+    Dim Qty As Double
+
+    ' Get values from form controls
+    Dim NumDays As Integer
+    Dim NumTests As Integer
+    Dim TestLength As Integer
+    Dim LeakageType As Integer
+    Dim Addons As Integer
+    Dim AddonCost As Currency
+    Dim SCCost As Currency
+    Dim ACOExtraTests As Double
+
+
+
+TempVars("DeptName") = Nz(Forms!MAIN_FORM!subContentFrame.Form!DepartmentID.Column(1), 0)
+TempVars("TestID") = Nz(Forms!MAIN_FORM!subContentFrame.Form!TestID, 0)
+    
+    Forms!MAIN_FORM!subContentFrame.Form!TestPrice.value = 0 ' theres an issue here on closedown - TBC
+
+    NumDays = Nz(Forms!MAIN_FORM!subContentFrame.Form!NumDays, 0)
+    NumTests = 1 'Nz(Forms!MAIN_FORM!subContentFrame.Form!NumTests, 0)
+    TestLength = Nz(Forms!MAIN_FORM!subContentFrame.Form!TestLength, 0)
+    LeakageType = Nz(Forms!MAIN_FORM!subContentFrame.Form!AirLeakage, 0)
+    TestID = Nz(Forms!MAIN_FORM!subContentFrame.Form!TestID, 0)
+    'Addons = Nz(Forms!MAIN_FORM!subContentFrame.Form!AdditionalTCs, 0)
+
+    Set rs = CurrentDb.OpenRecordset("SELECT * FROM t_AccreditedTests WHERE TestID = " & TestID)
+
+    If Not rs.EOF Then
+
+'-----------------------AIRBORNE AND IMPACT ACOUSTICS-------------------------------
+
+        If TempVars("DeptName") = "Acoustics" And TempVars("TestID") <> 18 Then ' Acoustics, not equal to 10140-1 (Rainfall)
+        
+            Qty = Nz(NumDays, 1)
+            cost = Nz(rs!DayRate, 0)
+            totalCost = totalCost + (Qty * cost)
+            Addons = Nz(Forms!MAIN_FORM!subContentFrame.Form!NumAlts, 0)
+            AddonCost = Nz(Addons, 0) * Nz(rs!AdditionalTests, 0)
+            SCCost = Nz(Forms!MAIN_FORM!subContentFrame.Form!SCPrice, 0)
+            
+        End If
+
+'---------------------------------RAINFALL ACOUSTICS--------------------------------
+
+        If TempVars("DeptName") = "Acoustics" And TempVars("TestID") = 18 Then ' Acoustics, Rainfall (18)
+            Qty = Nz(NumDays, 1)
+            cost = Nz(rs!DayRate, 0)
+            totalCost = totalCost + (Qty * cost)
+            ACOExtraTests = Nz(Forms!MAIN_FORM!subContentFrame.Form!NumAlts, 0) * Nz(rs!NumAlts, 0)
+            totalCost = totalCost + ACOExtraTests
+        End If
+
+'---------------------------RESISTANCE (FURNACE & 8414 TESTS)------------------------------
+
+        If TempVars("DeptName") = "Resistance" Then
+        
+            Select Case TempVars("TestID")
+            
+                Case 13, 14, 15 '#### These are the TestIDs for the 8414 tests
+                    
+                    Qty = Nz(Forms!MAIN_FORM!subContentFrame.Form!NumWeeks, 1)
+                    cost = Nz(rs!WeekRate, 0)
+                    totalCost = totalCost + (Qty * cost)
+                    
+                Case Else '#### All other Resistance furnace TestsIDs
+                    
+                    Select Case TestLength
+                    
+                        Case 1: Qty = NumTests: cost = Nz(rs!Mins30, 0)
+                        Case 2: Qty = NumTests: cost = Nz(rs!mins45, 0)
+                        Case 3: Qty = NumTests: cost = Nz(rs!Mins60, 0)
+                        Case 4: Qty = NumTests: cost = Nz(rs!Mins90, 0)
+                        Case 5: Qty = NumTests: cost = Nz(rs!Mins120, 0)
+                        Case 6: Qty = NumTests: cost = Nz(rs!Mins150, 0)
+                        Case 7: Qty = NumTests: cost = Nz(rs!Mins180, 0)
+                        Case 8: Qty = NumTests: cost = Nz(rs!Mins240, 0)
+                        'Case 9: qty = NumTests: cost = Nz(rs!minsNA, 0) ' this is for Acoustics
+                        Case Else: Qty = 0: cost = 0
+                        
+                    End Select
+                    
+                    totalCost = totalCost + (Qty * cost)
+            
+            End Select
+            
+                Addons = Nz(Forms!MAIN_FORM!subContentFrame.Form!AdditionalTCs, 0)
+                AddonCost = Nz(Addons, 0) * Nz(rs!AdditionalTCs, 0) '+ Forms!MAIN_FORM!subContentFrame.Form!OverRun.Column(2)
+                totalCost = totalCost
+                            
+        End If
+
+'--------------------------------REACTION TESTS----------------------------------
+
+        If TempVars("DeptName") = "Reaction" Then
+        
+        ' this logic is currently handled in the Specimen form as its easier to insert prices when calculating the
+        ' naming string and creating the specimen record. May change later
+        
+        End If
+
+
+'--------------------------------PHYSICAL TESTS----------------------------------
+
+        If TempVars("DeptName") = "Physical" Then
+        
+        ' there are currently no determinants for physical pricing - needs addressing
+        'but due o the currently low volumn of interest, time better spent elsewhere
+        
+        End If
+        
+'-----------------------------CALCULATION TESTS----------------------------------
+        
+        If TempVars("DeptName") = "Calculations" Then
+        
+        cost = DLookup("Calcs", "t_AccreditedTests", "TestID = " & TempVars("TestID"))
+        Qty = 1
+        totalCost = cost
+        AddonCost = 0#
+        
+        End If
+        
+'-------------------------------------END----------------------------------------
+
+
+
+    End If
+
+    rs.Close
+    Set rs = Nothing
+    
+    Forms!MAIN_FORM!subContentFrame.Form!TestPrice = totalCost
+    Forms!MAIN_FORM!subContentFrame.Form!AddonPrice = AddonCost
+    'Forms!MAIN_FORM!subContentFrame.Form!SCPrice = SCCost
+    
+    CalcListPriceForQuote
+    
+End Sub
+
+Public Sub CalcListPriceForQuote()
+
+
+
+End Sub

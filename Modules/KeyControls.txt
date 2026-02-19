@@ -1,0 +1,12 @@
+Option Compare Database
+
+Option Explicit
+
+' Module: mKeys
+Public Sub BlockNavKeys(ByRef KeyCode As Integer, ByVal Shift As Integer)
+    If KeyCode = vbKeyControl Then
+        KeyCode = 0
+    ElseIf (Shift And acCtrlMask) <> 0 And KeyCode = vbKeyTab Then
+        KeyCode = 0
+    End If
+End Sub

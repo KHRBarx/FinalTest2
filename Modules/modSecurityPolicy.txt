@@ -1,0 +1,313 @@
+Option Compare Database
+Option Explicit
+
+'====================================================
+' modSecurityPolicy
+'  - Loads role-based security rules into memory once per session
+'  - Applies rules to forms/controls on demand
+'
+' Tables expected:
+'   x_SecurityRules (RuleID PK, FormName, ControlName, RuleType, IsActive)
+'   x_SecurityRoles (RoleID PK, RoleName, SortOrder, IsAdmin)
+'   x_SecurityRuleRoles (ID PK, RuleID FK, RoleID FK, IsAllowed)
+'   t_StaffRoles (ID PK, StaffID FK, RoleID FK, IsActive)
+'
+' Behaviour:
+'   - If a rule EXISTS and user is NOT allowed, the engine enforces the restrictive state
+'   - If a rule DOES NOT exist, the engine does nothing (form behaves as designed)
+'   - Multi-role users: allowed if ANY of their roles allows the rule
+'
+' RuleType support (normalised by UCase+Trim):
+'   CONTROL_VISIBLE  -> Visible = Allowed
+'   CONTROL_ENABLED  -> Enabled = Allowed
+'   CONTROL_LOCKED   -> Locked = Not Allowed (fallback: Enabled = Allowed for controls without Locked)
+'   FORM_ALLOW_EDIT  -> If NOT allowed: AllowEdits/Additions/Deletions = False (else do nothing)
+'
+'====================================================
+
+Private m_SecLoaded As Boolean
+Private m_StaffID As Long
+
+'Allowed RuleIDs for the current session
+Private m_AllowedRuleIDs As Object 'Scripting.Dictionary (key=RuleID, item=True)
+
+'Rules grouped by FormName (normalised)
+'Each item is a Collection of Variant arrays: Array(RuleID As Long, RuleTypeNorm As String, ControlNameNorm As String)
+Private m_RulesByForm As Object 'Scripting.Dictionary
+
+Private Const FORMKEY_GLOBAL As String = "*GLOBAL*"
+
+'-------------------------
+' Public API
+'-------------------------
+Public Sub Sec_InitSecuritySession(ByVal StaffID As Long)
+    On Error GoTo EH
+
+    m_StaffID = StaffID
+    Set m_AllowedRuleIDs = CreateObject("Scripting.Dictionary")
+    m_AllowedRuleIDs.CompareMode = vbTextCompare
+
+    Set m_RulesByForm = CreateObject("Scripting.Dictionary")
+    m_RulesByForm.CompareMode = vbTextCompare
+
+    LoadActiveRules
+    LoadAllowedRulesForStaff StaffID
+
+    m_SecLoaded = True
+
+ExitHere:
+    Exit Sub
+EH:
+    'Fail soft: never block startup
+    Debug.Print "Sec_InitSecuritySession: " & Err.Number & " - " & Err.Description
+    m_SecLoaded = False
+    Resume ExitHere
+End Sub
+
+Public Sub Sec_ApplyFormSecurity(ByVal frm As Form)
+    On Error GoTo EH
+
+    If frm Is Nothing Then Exit Sub
+    If Not m_SecLoaded Then Exit Sub
+
+    Dim fKey As String
+    fKey = NormKey(frm.Name)
+
+    'Apply global rules first, then form-specific
+    ApplyRulesForKey frm, FORMKEY_GLOBAL
+    ApplyRulesForKey frm, fKey
+
+ExitHere:
+    Exit Sub
+EH:
+    Debug.Print "Sec_ApplyFormSecurity(" & frm.Name & "): " & Err.Number & " - " & Err.Description
+    Resume ExitHere
+End Sub
+
+Public Sub Sec_ReloadSecurity()
+    'Call this after management edits the matrix, to reload without restart
+    Sec_InitSecuritySession m_StaffID
+End Sub
+
+'-------------------------
+' Internal loaders
+'-------------------------
+Private Sub LoadActiveRules()
+    On Error GoTo EH
+
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim sql As String
+
+    sql = ""
+    sql = sql & "SELECT RuleID, FormName, ControlName, RuleType "
+    sql = sql & "FROM x_SecurityRules "
+    sql = sql & "WHERE IsActive = True;"
+
+    Set db = CurrentDb
+    Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+
+    Do While Not rs.EOF
+        Dim RuleID As Long
+        Dim formKey As String
+        Dim ctlKey As String
+        Dim rt As String
+
+        RuleID = CLng(Nz(rs!RuleID, 0))
+        rt = NormKey(Nz(rs!RuleType, ""))
+
+        formKey = NormKey(Nz(rs!FormName, ""))
+        If formKey = "" Then formKey = FORMKEY_GLOBAL
+
+        ctlKey = NormKey(Nz(rs!ControlName, "")) 'blank means "form level" where appropriate
+
+        AddRuleToBucket formKey, Array(RuleID, rt, ctlKey)
+
+        rs.MoveNext
+    Loop
+
+ExitHere:
+    On Error Resume Next
+    rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+    Exit Sub
+EH:
+    Debug.Print "LoadActiveRules: " & Err.Number & " - " & Err.Description
+    Resume ExitHere
+End Sub
+
+Private Sub LoadAllowedRulesForStaff(ByVal StaffID As Long)
+    On Error GoTo EH
+
+    Dim db As DAO.Database
+    Dim rs As DAO.Recordset
+    Dim sql As String
+
+    'Allowed if ANY active staff-role maps to an allowed RuleID
+    sql = ""
+    sql = sql & "SELECT DISTINCT rr.RuleID "
+    sql = sql & "FROM (t_StaffRoles AS sr "
+    sql = sql & "INNER JOIN x_SecurityRuleRoles AS rr ON sr.RoleID = rr.RoleID) "
+    sql = sql & "WHERE sr.IsActive = True "
+    sql = sql & "  AND rr.IsAllowed = True "
+    sql = sql & "  AND sr.StaffID = " & CLng(StaffID) & ";"
+
+    Set db = CurrentDb
+    Set rs = db.OpenRecordset(sql, dbOpenSnapshot)
+
+    Do While Not rs.EOF
+        Dim rid As Long
+        rid = CLng(Nz(rs!RuleID, 0))
+        If rid <> 0 Then
+            If Not m_AllowedRuleIDs.exists(CStr(rid)) Then
+                m_AllowedRuleIDs.Add CStr(rid), True
+            End If
+        End If
+        rs.MoveNext
+    Loop
+
+ExitHere:
+    On Error Resume Next
+    rs.Close
+    Set rs = Nothing
+    Set db = Nothing
+    Exit Sub
+EH:
+    Debug.Print "LoadAllowedRulesForStaff: " & Err.Number & " - " & Err.Description
+    Resume ExitHere
+End Sub
+
+Private Sub AddRuleToBucket(ByVal formKey As String, ByVal ruleArr As Variant)
+    Dim col As Collection
+    If Not m_RulesByForm.exists(formKey) Then
+        Set col = New Collection
+        m_RulesByForm.Add formKey, col
+    Else
+        Set col = m_RulesByForm(formKey)
+    End If
+    col.Add ruleArr
+End Sub
+
+'-------------------------
+' Internal applicator
+'-------------------------
+Private Sub ApplyRulesForKey(ByVal frm As Form, ByVal formKey As String)
+    On Error GoTo EH
+
+    If Not m_RulesByForm.exists(formKey) Then Exit Sub
+
+    Dim col As Collection
+    Set col = m_RulesByForm(formKey)
+
+    Dim i As Long
+    For i = 1 To col.Count
+        Dim arr As Variant
+        Dim RuleID As Long
+        Dim rt As String
+        Dim ctlKey As String
+        Dim allowed As Boolean
+
+        arr = col(i)
+        RuleID = CLng(arr(0))
+        rt = CStr(arr(1))
+        ctlKey = CStr(arr(2))
+
+        allowed = IsRuleAllowed(RuleID)
+
+        Select Case rt
+            Case "FORM_ALLOW_EDIT"
+                'Only enforce restriction; if allowed, leave as designed
+                If Not allowed Then
+                    frm.AllowEdits = False
+                    frm.AllowAdditions = False
+                    frm.AllowDeletions = False
+                End If
+
+            Case "CONTROL_VISIBLE", "CONTROL_ENABLED", "CONTROL_LOCKED"
+                If ctlKey <> "" Then
+                    ApplyControlRule frm, ctlKey, rt, allowed
+                End If
+
+            Case Else
+                'Unknown/unsupported: ignore
+        End Select
+    Next i
+
+ExitHere:
+    Exit Sub
+EH:
+    Debug.Print "ApplyRulesForKey(" & frm.Name & "," & formKey & "): " & Err.Number & " - " & Err.Description
+    Resume ExitHere
+End Sub
+
+Private Sub ApplyControlRule(ByVal frm As Form, ByVal ctlKey As String, ByVal RuleType As String, ByVal allowed As Boolean)
+    On Error GoTo EH
+
+    Dim ctl As Control
+    If Not ControlExists(frm, ctlKey) Then
+        Debug.Print "Sec: control not found: " & frm.Name & "." & ctlKey & " (" & RuleType & ")"
+        Exit Sub
+    End If
+
+    Set ctl = frm.Controls(ctlKey)
+
+    Select Case RuleType
+        Case "CONTROL_VISIBLE"
+            ctl.Visible = allowed
+
+        Case "CONTROL_ENABLED"
+            ctl.enabled = allowed
+
+        Case "CONTROL_LOCKED"
+            'Prefer Locked where supported; fallback to Enabled for command buttons etc.
+            If HasProperty(ctl, "Locked") Then
+                ctl.Locked = Not allowed
+            ElseIf HasProperty(ctl, "Enabled") Then
+                ctl.enabled = allowed
+            End If
+    End Select
+
+ExitHere:
+    Exit Sub
+EH:
+    Debug.Print "ApplyControlRule(" & frm.Name & "." & ctlKey & "): " & Err.Number & " - " & Err.Description
+    Resume ExitHere
+End Sub
+
+Private Function IsRuleAllowed(ByVal RuleID As Long) As Boolean
+    If RuleID = 0 Then
+        IsRuleAllowed = False
+    ElseIf m_AllowedRuleIDs Is Nothing Then
+        IsRuleAllowed = False
+    Else
+        IsRuleAllowed = m_AllowedRuleIDs.exists(CStr(RuleID))
+    End If
+End Function
+
+'-------------------------
+' Helpers
+'-------------------------
+Private Function NormKey(ByVal v As Variant) As String
+    NormKey = UCase$(Trim$(Nz(v, "")))
+End Function
+
+Private Function HasProperty(obj As Object, propName As String) As Boolean
+    On Error GoTo NoProp
+    Dim tmp As Variant
+    tmp = CallByName(obj, propName, VbGet)
+    HasProperty = True
+    Exit Function
+NoProp:
+    HasProperty = False
+End Function
+
+Private Function ControlExists(frm As Object, ctrlName As String) As Boolean
+    On Error GoTo ErrHandler
+    Dim c As Control
+    Set c = frm.Controls(ctrlName)
+    ControlExists = True
+    Exit Function
+ErrHandler:
+    ControlExists = False
+End Function

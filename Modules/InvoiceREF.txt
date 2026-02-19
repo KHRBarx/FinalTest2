@@ -1,0 +1,55 @@
+'Option Compare Database
+'Option Explicit
+'
+''==============================================================
+'' Legacy compatibility wrappers (canonical logic in modInvoice_Common)
+''==============================================================
+'
+'Public Function GetNextBaseNumber() As Long
+'    GetNextBaseNumber = modInvoice_Common.GetNextBaseNumber()
+'End Function
+'
+''Public Function EnsureBaseNumberForOrder(ByVal OrderID As Long) As Long
+''    EnsureBaseNumberForOrder = modInvoice_Common.EnsureBaseNumberForOrder(OrderID)
+''End Function
+'
+''Public Function GenerateInvoiceREFForOrder(ByVal OrderID As Long, ByVal invType As String) As String
+''    GenerateInvoiceREFForOrder = modInvoice_Common.GenerateInvoiceREFForOrder(OrderID, invType)
+''End Function
+'
+'Public Function GenerateInvoiceREF(ByVal invType As String) As String
+'    GenerateInvoiceREF = modInvoice_Common.GenerateInvoiceREF(invType)
+'End Function
+'
+'Public Sub LogInvoiceNumber( _
+'    ByVal invRef As String, _
+'    ByVal invDate As Variant, _
+'    ByVal InvoiceID As Long, _
+'    ByVal OrderID As Long, _
+'    Optional ByVal userName As Variant)
+'
+'    modInvoice_Common.LogInvoiceNumber invRef, invDate, InvoiceID, OrderID, userName
+'End Sub
+'
+''Public Sub AddInvoiceNumberRecord( _
+''    ByVal invID As Long, _
+''    ByVal invRef As String, _
+''    Optional ByVal invDate As Variant, _
+''    Optional ByVal userName As Variant)
+''
+''    modInvoice_Common.AddInvoiceNumberRecord invID, invRef, invDate, userName
+''End Sub
+'
+''Public Function GenerateSupplementaryInvoiceREFForOrder(ByVal OrderID As Long) As String
+''    GenerateSupplementaryInvoiceREFForOrder = modInvoice_Common.GenerateSupplementaryInvoiceREFForOrder(OrderID)
+''End Function
+'
+'Public Sub MarkInvoiceAsPaid( _
+'    ByVal invID As Long, _
+'    ByVal refText As String, _
+'    ByVal dtPaid As Date, _
+'    Optional ByVal PaidBy As String = "")
+'
+'    modInvoice_Common.MarkInvoiceAsPaid invID, refText, dtPaid, PaidBy
+'End Sub
+'

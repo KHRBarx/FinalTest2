@@ -1,0 +1,44 @@
+Public Function CountUniqueSampleNamesFromForm(frm As Form) As Long
+    On Error GoTo EH
+
+    Dim rs As DAO.Recordset
+    Dim dict As Object
+    Dim k As String
+
+    If frm Is Nothing Then
+        CountUniqueSampleNamesFromForm = 0
+        Exit Function
+    End If
+
+    Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = vbTextCompare
+
+    Set rs = frm.RecordsetClone
+    If (rs.BOF And rs.EOF) Then
+        CountUniqueSampleNamesFromForm = 0
+        GoTo CleanExit
+    End If
+
+    rs.MoveFirst
+    Do While Not rs.EOF
+        k = Trim$(Nz(rs.fields("SampleName").value, vbNullString))
+        If Len(k) > 0 Then
+            If Not dict.exists(k) Then dict.Add k, True
+        End If
+        rs.MoveNext
+    Loop
+
+    CountUniqueSampleNamesFromForm = dict.Count
+
+CleanExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+    Set dict = Nothing
+    Exit Function
+
+EH:
+    Debug.Print "CountUniqueSampleNamesFromForm error " & Err.Number & ": " & Err.Description
+    CountUniqueSampleNamesFromForm = 0
+    Resume CleanExit
+End Function

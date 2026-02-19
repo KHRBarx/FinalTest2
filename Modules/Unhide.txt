@@ -1,0 +1,27 @@
+Option Compare Database
+Option Explicit
+Public Sub ShowAll()
+
+DoCmd.SelectObject acForm, , True
+'DoCmd.RunCommand acCmdWindowUnhide
+DoCmd.ShowToolbar "Ribbon", acToolbarYes
+Application.SetOption "Show Status Bar", True
+
+End Sub
+
+Public Function Show_All()
+ShowAll
+End Function
+
+Public Sub HideAll()
+
+'DoCmd.NavigateTo "acNavigationCategoryObjectType"
+'DoCmd.RunCommand acCmdWindowHide
+DoCmd.ShowToolbar "Ribbon", acToolbarNo
+Application.SetOption "Show Status Bar", False
+
+End Sub
+
+Public Function Hide_All()
+HideAll
+End Function

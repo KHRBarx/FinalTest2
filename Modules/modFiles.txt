@@ -1,0 +1,81 @@
+Option Compare Database
+Option Explicit
+
+'Public Function FindLatestQuotePdf(ByVal QuoteNo As String) As String
+'    Dim basePath As String
+'    basePath = "\\cag-vm-fs01\RTC\Quotations\ARTCdb_Quotes\QUOTATIONS\"
+'
+'    Dim folderName As String
+'    Dim pdfName As String
+'    Dim candidatePath As String
+'    Dim newestPath As String
+'    Dim newestDate As Date
+'    Dim curDate As Date
+'
+'    ' Loop all subfolders that start with the quote number
+'    folderName = Dir(basePath & QuoteNo & "*", vbDirectory)
+'    Do While Len(folderName) > 0
+'        ' Skip . and .. and ensure it’s a folder
+'        If (folderName <> ".") And (folderName <> "..") Then
+'            If (GetAttr(basePath & folderName) And vbDirectory) = vbDirectory Then
+'                ' Inside this folder, look for PDFs that start with the quote number
+'                pdfName = Dir(basePath & folderName & "\" & QuoteNo & "*.pdf")
+'                Do While Len(pdfName) > 0
+'                    candidatePath = basePath & folderName & "\" & pdfName
+'
+'                    On Error Resume Next
+'                    curDate = FileDateTime(candidatePath)
+'                    If Err.Number = 0 Then
+'                        If newestPath = "" Or curDate > newestDate Then
+'                            newestDate = curDate
+'                            newestPath = candidatePath
+'                        End If
+'                    End If
+'                    On Error GoTo 0
+'
+'                    pdfName = Dir() ' next pdf in same folder
+'                Loop
+'            End If
+'        End If
+'        folderName = Dir() ' next folder
+'    Loop
+'
+'    FindLatestQuotePdf = newestPath  ' "" if nothing found
+'End Function
+
+
+Public Function FindLatestQuotePdf_FSO(ByVal quoteNo As String) As String
+    Dim basePath As String: basePath = "\\cag-vm-fs01\RTC\Quotations\ARTCdb_Quotes\QUOTATIONS\"
+    Dim fso As Object, baseFolder As Object, subf As Object, fil As Object
+    Dim newestPath As String, newestDate As Date
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(basePath) Then Exit Function
+    Set baseFolder = fso.GetFolder(basePath)
+
+    For Each subf In baseFolder.SubFolders
+        If Left$(subf.Name, Len(quoteNo)) = quoteNo Then
+            For Each fil In subf.Files
+                If LCase$(fso.GetExtensionName(fil.Name)) = "pdf" _
+                   And Left$(fil.Name, Len(quoteNo)) = quoteNo Then
+                    If Len(newestPath) = 0 Or fil.DateLastModified > newestDate Then
+                        newestDate = fil.DateLastModified
+                        newestPath = fil.path
+                    End If
+                End If
+            Next fil
+        End If
+    Next subf
+
+    FindLatestQuotePdf_FSO = newestPath
+End Function
+
+Public Sub OpenLatestQuotePdf(ByVal quoteNo As String)
+    Dim p As String
+    p = FindLatestQuotePdf_FSO(Trim$(CStr(quoteNo)))
+    If Len(p) > 0 Then
+        Application.FollowHyperlink p
+    Else
+        MsgBox "No matching PDF found for quote '" & quoteNo & "'.", vbExclamation
+    End If
+End Sub

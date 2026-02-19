@@ -1,0 +1,671 @@
+Option Compare Database
+Option Explicit
+
+Private Const DEBUG_CC_MISSING_SUPP As Boolean = False
+Private Const wdNoProtection As Long = -1
+
+'==============================================================
+' Ensure document editable
+'==============================================================
+Private Sub EnsureDocEditable(ByVal doc As Object)
+    On Error Resume Next
+    If doc.ProtectionType <> wdNoProtection Then
+        doc.Unprotect
+    End If
+End Sub
+
+'==============================================================
+' Supplementary Invoice Word Export (Content Controls)
+' Template: r_TemplateSupplementaryInvoice.dotx
+'==============================================================
+Public Function CreateSupplementaryInvoiceFiles_SuppWord( _
+    ByVal InvoiceID As Long, _
+    ByVal docxPath As String, _
+    ByVal pdfPath As String, _
+    Optional ByVal SpecimenNumber As String = "", _
+    Optional ByVal overrunDesc As String = "", _
+    Optional ByVal sampleTypeText As String = "") As Boolean
+
+    On Error GoTo ErrHandler
+    CreateSupplementaryInvoiceFiles_SuppWord = False
+
+    Dim db As DAO.Database
+    Dim rsInv As DAO.Recordset
+    Dim sql As String
+
+    Dim wdApp As Object
+    Dim wdDoc As Object
+    Dim TemplatePath As String
+
+    Set db = CurrentDb
+
+    sql = "SELECT * FROM q_IssuedInvoiceDocument WHERE InvoiceID=" & InvoiceID
+    Set rsInv = db.OpenRecordset(sql, dbOpenSnapshot)
+    If rsInv.EOF Then
+        MsgBox "No invoice found in q_IssuedInvoiceDocument for InvoiceID " & InvoiceID, vbExclamation
+        GoTo CleanExit
+    End If
+
+    'If the NAME of the template changes, change the 'Supplementary Invoice' string below to that name.
+    TemplatePath = DLookup("TemplatePath", "t_TemplateDocuments", "Description = 'Supplementary Invoice'")
+
+    Set wdApp = CreateObject("Word.Application")
+    wdApp.Visible = True
+    Set wdDoc = wdApp.Documents.Add(Template:=TemplatePath, NewTemplate:=False, DocumentType:=0)
+
+    EnsureDocEditable wdDoc
+
+    '========================
+    ' Fill blocks
+    '========================
+    Fill_ClientBlock_Supp wdDoc, rsInv
+    Fill_InvoiceDetails_Supp wdDoc, rsInv
+    Fill_InvoiceIntro_Supp wdDoc, rsInv
+
+    Fill_TermsAndRefs_Supp wdDoc, rsInv, InvoiceID
+    Fill_Financials_Supp wdDoc, rsInv, InvoiceID
+    RemoveDiscountRowIfZero_Supp wdDoc, InvoiceID
+
+    FillSection_TestSpecimen_Supp wdDoc, rsInv, InvoiceID, SpecimenNumber, overrunDesc, sampleTypeText
+    Fill_PageFooter_Supp wdDoc
+
+    '========================
+    ' Save outputs
+    '========================
+    On Error GoTo SaveFail
+    wdDoc.SaveAs2 fileName:=docxPath, FileFormat:=16
+    wdDoc.ExportAsFixedFormat OutputFileName:=pdfPath, ExportFormat:=17
+
+    CreateSupplementaryInvoiceFiles_SuppWord = True
+
+CleanExit:
+    On Error Resume Next
+    If Not rsInv Is Nothing Then rsInv.Close
+    Set rsInv = Nothing
+    Exit Function
+
+SaveFail:
+    MsgBox "Supplementary Word export failed: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume CleanExit
+
+ErrHandler:
+    MsgBox "Supplementary invoice document generation failed: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume CleanExit
+End Function
+
+'========================
+' Client / header blocks
+'========================
+Private Sub Fill_ClientBlock_Supp(ByVal doc As Object, ByVal rsInv As DAO.Recordset)
+    SetCCTextIfExists doc, "Client", Nz(rsInv!Client, "")
+
+    Dim addr As String
+    addr = BuildAddressFromRecord(rsInv, _
+        "Address1Line1", "Address1Line2", "Address1Line3", _
+        "Address1Line4", "Address1Line5", "Address1Line6")
+
+    SetCCTextIfExists doc, "ClientAddress", addr
+End Sub
+
+Private Sub Fill_InvoiceDetails_Supp(ByVal doc As Object, ByVal rsInv As DAO.Recordset)
+    With rsInv
+        SetCCTextIfExists doc, "InvoiceREF", Nz(.fields("InvoiceREF"), "")
+        SetCCTextIfExists doc, "ClientCode", Nz(.fields("ClientCode"), "")
+        SetCCTextIfExists doc, "QuoteNumber", Nz(.fields("QuoteNumber"), "")
+        SetCCTextIfExists doc, "VNumber", Nz(.fields("VNumber"), "")
+
+        Dim invDate As Variant
+        invDate = .fields("DateIssued")
+        If Not IsNull(invDate) Then
+            SetCCTextIfExists doc, "InvoiceDate", Format(invDate, "d-mmm-yy")
+        Else
+            SetCCTextIfExists doc, "InvoiceDate", Format(Date, "d-mmm-yy")
+        End If
+
+        SetCCTextIfExists doc, "PORef", Nz(.fields("PurchaseOrderRef"), "")
+    End With
+End Sub
+
+Private Sub Fill_InvoiceIntro_Supp(ByVal doc As Object, ByVal rsInv As DAO.Recordset)
+    Dim po As String
+    po = Nz(RSValue(rsInv, "PurchaseOrderRef", "PurchaseOrderREF"), "")
+
+    If Len(Trim$(po)) > 0 Then
+        SetCCTextIfExists doc, "InvoiceIntro", "Supplementary Invoice for Purchase Order - " & po & ";"
+    Else
+        SetCCTextIfExists doc, "InvoiceIntro", "Supplementary Invoice for;"
+    End If
+End Sub
+
+'========================
+' Terms / refs (delete rows if blank)
+'========================
+Private Sub Fill_TermsAndRefs_Supp(ByVal doc As Object, ByVal rsInv As DAO.Recordset, ByVal InvoiceID As Long)
+
+    ' TERMS
+    Dim NoDays As Long
+    NoDays = Nz(RSValue(rsInv, "NoDays"), 0)
+
+    Dim termsText As String
+    If NoDays > 0 Then
+        termsText = CStr(NoDays) & " days"
+    Else
+        termsText = ""
+    End If
+    SetCCTextIfExists doc, "Terms", termsText
+
+    ' DUE DATE (match Part behaviour: DateIssued + NoDays; fallback today)
+    Dim DueDate As Variant
+    DueDate = Null
+    If NoDays > 0 Then
+        Dim baseDate As Variant
+        baseDate = RSValue(rsInv, "DateIssued")
+        If IsNull(baseDate) Then baseDate = Date
+        DueDate = DateAdd("d", NoDays, CDate(baseDate))
+    End If
+
+    If Not IsNull(DueDate) Then
+        SetCCTextIfExists doc, "DueDate", Format$(CDate(DueDate), "d-mmm-yy")
+    Else
+        SetCCTextIfExists doc, "DueDate", ""
+    End If
+
+    ' DEPOSIT REF (remove row if blank)
+    Dim ordID As Long
+    ordID = GetOrderIDForInvoice(InvoiceID)
+
+    Dim depRef As String
+    depRef = GetLatestDepositInvoiceRefForOrder(ordID)
+
+    Dim ccDep As Object
+    Set ccDep = GetCCByTag(doc, "DepositREF")
+    If Not ccDep Is Nothing Then
+        UnlockCC ccDep
+        ccDep.Range.text = depRef
+
+        If Len(CleanWordTableText(ccDep.Range.text)) = 0 Then
+            DeleteRowContainingCC ccDep
+            Dim ccLbl As Object
+            Set ccLbl = GetCCByTag(doc, "label_DepositREF")
+            If Not ccLbl Is Nothing Then DeleteRowContainingCC ccLbl
+        End If
+    End If
+
+    ' CREDIT REF (match Part behaviour: remove row if no credit APPLIED)
+    Dim CreditApplied As Currency
+    CreditApplied = CCur(Nz(RSValue(rsInv, "AppliedCredit", "Credit", "LessCredit", "CreditToApply", "CreditApplied"), 0))
+
+    Dim ccCredit As Object
+    Set ccCredit = GetCCByTag(doc, "CreditREF")
+
+    If CreditApplied <= 0 Then
+        If Not ccCredit Is Nothing Then DeleteRowContainingCC ccCredit
+        Dim ccLbl2 As Object
+        Set ccLbl2 = GetCCByTag(doc, "label_CreditREF")
+        If Not ccLbl2 Is Nothing Then DeleteRowContainingCC ccLbl2
+    Else
+        If Not ccCredit Is Nothing Then
+            UnlockCC ccCredit
+            ccCredit.Range.text = Nz(RSValue(rsInv, "CreditREF", "CreditRef"), "")
+            If Len(CleanWordTableText(ccCredit.Range.text)) = 0 Then
+                DeleteRowContainingCC ccCredit
+            End If
+        End If
+    End If
+
+End Sub
+
+'========================
+' Financials (Part-like token replacement for VVV + robust VATAmount)
+'========================
+Private Sub Fill_Financials_Supp(ByVal doc As Object, ByVal rsInv As DAO.Recordset, ByVal InvoiceID As Long)
+    On Error GoTo Fail
+
+    Dim ClientID As Long
+    ClientID = Nz(RSValue(rsInv, "ClientID"), 0)
+
+    ' VAT rate: prefer q_IssuedInvoiceDocument.VAT (like Part), else t_Clients.VAT
+    Dim VATRate As Double
+    VATRate = Nz(RSValue(rsInv, "VAT"), 0)
+    If VATRate = 0 And ClientID <> 0 Then VATRate = Nz(DLookup("VAT", "t_Clients", "ClientID=" & ClientID), 0)
+    If VATRate > 1 Then VATRate = VATRate / 100 ' normalize 20 -> 0.2
+
+    ' InvoiceValue should come from t_Invoices for Supplementary
+    Dim netValue As Currency
+    netValue = CCur(Nz(DLookup("InvoiceValue", "t_Invoices", "InvoiceID=" & InvoiceID), 0))
+    If netValue = 0 Then netValue = CCur(Nz(RSValue(rsInv, "InvoiceValue", "QuoteValue", "InvoiceBaseNet"), 0))
+
+    ' Credit applied (if any) affects VAT base, mirror Part logic
+    Dim CreditApplied As Currency
+    CreditApplied = CCur(Nz(RSValue(rsInv, "AppliedCredit", "Credit", "LessCredit", "CreditToApply", "CreditApplied"), 0))
+    If CreditApplied < 0 Then CreditApplied = 0
+    If CreditApplied > netValue Then CreditApplied = netValue
+
+    Dim netAfterCredit As Currency
+    netAfterCredit = netValue - CreditApplied
+
+    ' VATAmount: prefer stored amount, else compute
+    Dim VATAmount As Currency
+    VATAmount = CCur(Nz(DLookup("VATAmount", "t_Invoices", "InvoiceID=" & InvoiceID), 0))
+    If VATAmount = 0 And VATRate <> 0 Then
+        VATAmount = CCur(Round(netAfterCredit * VATRate, 2))
+    End If
+
+    Dim totalPayable As Currency
+    totalPayable = CCur(Round(netAfterCredit + VATAmount, 2))
+
+    ' Keep DB aligned for later email / reporting consistency (safe if fields exist)
+    On Error Resume Next
+    CurrentDb.Execute "UPDATE t_Invoices SET " & _
+                      "VATAmount=" & SqlMoney(VATAmount) & ", " & _
+                      "InvoiceIncVAT=" & SqlMoney(totalPayable) & _
+                      " WHERE InvoiceID=" & InvoiceID & ";", dbFailOnError
+    On Error GoTo Fail
+
+    ' Populate CCs
+    SetCCTextIfExistsAny doc, FormatCurrency(netValue, 2), "GrossFee", "Gross Fee", "Initial Fee"
+    SetCCTextIfExistsAny doc, FormatCurrency(netValue, 2), "LessDiscount", "Less Discount"
+    SetCCTextIfExistsAny doc, FormatCurrency(VATAmount, 2), "VATAmount", "VAT Amount"
+    SetCCTextIfExistsAny doc, FormatCurrency(totalPayable, 2), "Total", "Total Payable"
+
+    ' LessDeposit row: remove if zero/blank
+    Dim depAmt As Currency
+    depAmt = CCur(Nz(RSValue(rsInv, "LessDeposit", "DepositToPay", "DepositTotal"), 0))
+    If depAmt > 0 Then
+        SetCCTextIfExistsAny doc, FormatCurrency(depAmt, 2), "LessDeposit", "Less Deposit"
+    Else
+        Dim ccLD As Object
+        Set ccLD = GetCCByTag(doc, "LessDeposit")
+        If Not ccLD Is Nothing Then DeleteRowContainingCC ccLD
+    End If
+
+    ' LessCredit row: remove if zero/blank; else show remaining net after credit (Part-style)
+    If CreditApplied > 0 Then
+        SetCCTextIfExistsAny doc, FormatCurrency(netAfterCredit, 2), "LessCredit", "Less Credit"
+    Else
+        Dim ccLC As Object
+        Set ccLC = GetCCByTag(doc, "LessCredit")
+        If Not ccLC Is Nothing Then DeleteRowContainingCC ccLC
+    End If
+
+    ' Replace footer token VVV with VAT %
+    ReplaceFinancialFooterTokens_Supp doc, VATRate
+
+    Exit Sub
+
+Fail:
+    MsgBox "Supplementary financials failed: " & Err.Number & " - " & Err.Description, vbCritical
+End Sub
+
+Private Sub ReplaceFinancialFooterTokens_Supp(ByVal doc As Object, ByVal VATRate As Double)
+    Dim rng As Object
+    Set rng = Nothing
+
+    ' 1) Prefer Section_Financials if present
+    Dim secFin As Object
+    Set secFin = GetCCByTag(doc, "Section_Financials")
+    If Not secFin Is Nothing Then
+        UnlockCC secFin
+        Set rng = secFin.Range.Duplicate
+    End If
+
+    ' 2) Fallback: use the table containing VATAmount (where VVV usually lives)
+    If rng Is Nothing Then
+        Dim ccVAT As Object
+        Set ccVAT = GetCCByTag(doc, "VATAmount")
+        If Not ccVAT Is Nothing Then
+            If ccVAT.Range.Tables.Count > 0 Then
+                Set rng = ccVAT.Range.Tables(1).Range.Duplicate
+            End If
+        End If
+    End If
+
+    ' 3) Last resort: whole document
+    If rng Is Nothing Then
+        Set rng = doc.content.Duplicate
+    End If
+
+    ReplaceAllInRange rng, "VVV", IIf(VATRate = 0, "", FormatPercent(VATRate, 1))
+End Sub
+
+Private Sub ReplaceAllInRange(ByVal rng As Object, ByVal findText As String, ByVal replaceText As String)
+    With rng.Find
+        .ClearFormatting
+        .replacement.ClearFormatting
+        .text = findText
+        .replacement.text = replaceText
+        .Forward = True
+        .Wrap = 1           ' wdFindContinue
+        .Format = False
+        .MatchCase = False
+        .MatchWholeWord = False
+        .MatchWildcards = False
+        .Execute Replace:=2 ' wdReplaceAll
+    End With
+End Sub
+
+Private Sub RemoveDiscountRowIfZero_Supp(ByVal doc As Object, ByVal InvoiceID As Long)
+    On Error GoTo SafeExit
+
+    Dim disc As Double
+    disc = Nz(DLookup("Discount", "q_IssuedInvoiceDocument", "InvoiceID=" & InvoiceID), 0)
+    If Abs(disc) > 0.0000001 Then Exit Sub
+
+    Dim ccLD As Object
+    Set ccLD = GetCCByTag(doc, "LessDiscount")
+    If Not ccLD Is Nothing Then
+        UnlockCC ccLD
+        If ccLD.Range.Cells.Count > 0 Then
+            ccLD.Range.Cells(1).row.Delete
+            Exit Sub
+        End If
+    End If
+
+SafeExit:
+End Sub
+
+'========================
+' Specimen section (single row CCs)
+'========================
+Private Sub FillSection_TestSpecimen_Supp( _
+    ByVal doc As Object, _
+    ByVal rsInv As DAO.Recordset, _
+    ByVal InvoiceID As Long, _
+    ByVal SpecimenNumber As String, _
+    ByVal overrunDesc As String, _
+    ByVal sampleTypeText As String)
+
+    On Error GoTo Fail
+
+    Dim ordID As Long
+    ordID = GetOrderIDForInvoice(InvoiceID)
+
+    Dim Notes As String
+    Notes = Nz(RSValue(rsInv, "InvoiceNotes", "InvoiceNote"), "")
+
+    If Len(Trim$(SpecimenNumber)) = 0 Then
+        SpecimenNumber = ParseAfterToken(Notes, " for ")
+    End If
+    If Len(Trim$(overrunDesc)) = 0 Then
+        overrunDesc = ParseBetweenTokens(Notes, "Test Over-run:", " for ")
+        If Len(Trim$(overrunDesc)) = 0 Then overrunDesc = Notes
+    End If
+
+    ' Pull specimen metadata from q_DepositInvoiceSpecimen (this is what worked before)
+    Dim Dept As String, sampleTypeName As String, stdNum As String
+    Dept = ""
+    sampleTypeName = ""
+    stdNum = ""
+
+    If Len(Trim$(SpecimenNumber)) > 0 Then
+        LoadSpecimenMetaFromDepositQuery ordID, SpecimenNumber, Dept, sampleTypeName, stdNum
+    End If
+
+    ' Fee/total must be taken from t_Invoices.InvoiceValue
+    Dim invValue As Currency
+    invValue = CCur(Nz(DLookup("InvoiceValue", "t_Invoices", "InvoiceID=" & InvoiceID), 0))
+    If invValue = 0 Then invValue = CCur(Nz(RSValue(rsInv, "InvoiceValue", "QuoteValue"), 0))
+
+    SetCCTextIfExists doc, "Spec_SampNum", SpecimenNumber
+    SetCCTextIfExists doc, "Spec_SampleType", sampleTypeName
+    SetCCTextIfExists doc, "Spec_Standards", stdNum
+    SetCCTextIfExists doc, "Spec_Department", Dept
+    SetCCTextIfExists doc, "Spec_Overrun", overrunDesc
+
+If Len(Trim$(sampleTypeText)) > 0 Then
+    SetCCTextIfExists doc, "Spec_SampleType", sampleTypeText
+Else
+    ' fallback to query-derived value if available
+    SetCCTextIfExists doc, "Spec_SampleType", sampleTypeName
+End If
+
+    ' Spec_TestFee may be removed from template; harmless if missing
+    SetCCTextIfExists doc, "Spec_TestFee", FormatCurrency(invValue, 2)
+    SetCCTextIfExists doc, "Spec_Total", FormatCurrency(invValue, 2)
+
+    Exit Sub
+
+Fail:
+    MsgBox "Supplementary specimen section failed: " & Err.Number & " - " & Err.Description, vbExclamation
+End Sub
+
+Private Sub LoadSpecimenMetaFromDepositQuery( _
+    ByVal OrderID As Long, _
+    ByVal SpecimenNumber As String, _
+    ByRef DepartmentOut As String, _
+    ByRef SampleTypeNameOut As String, _
+    ByRef StandardsOut As String)
+
+    On Error GoTo SafeExit
+
+    Dim rs As DAO.Recordset
+    Dim sql As String
+    sql = "SELECT * FROM q_DepositInvoiceSpecimen WHERE OrderID=" & OrderID
+
+    Set rs = CurrentDb.OpenRecordset(sql, dbOpenSnapshot)
+    Do While Not rs.EOF
+        If StrComp(Nz(rs.fields("SpecimenNumber").value, ""), SpecimenNumber, vbTextCompare) = 0 Then
+            DepartmentOut = Nz(RSValue(rs, "Department"), "")
+            SampleTypeNameOut = Nz(RSValue(rs, "SampleTypeName"), "")
+            StandardsOut = Nz(RSValue(rs, "stdNumber"), "")
+            Exit Do
+        End If
+        rs.MoveNext
+    Loop
+
+SafeExit:
+    On Error Resume Next
+    If Not rs Is Nothing Then rs.Close
+    Set rs = Nothing
+End Sub
+
+'========================
+' Footer
+'========================
+Private Sub Fill_PageFooter_Supp(ByVal doc As Object)
+    On Error Resume Next
+    If Len(Nz(TempVars!TnCName, "")) > 0 Then
+        SetCCTextIfExistsAny doc, Nz(TempVars!TnCName, ""), "TnCDocument"
+    End If
+End Sub
+
+'==============================================================
+' Helpers (same style as Part)
+'==============================================================
+Private Sub UnlockCC(ByVal cc As Object)
+    On Error Resume Next
+    cc.LockContents = False
+    cc.LockContentControl = False
+End Sub
+
+Private Sub SetCCTextIfExists(ByVal doc As Object, ByVal tagName As String, ByVal valueText As String)
+    Dim cc As Object
+    Set cc = GetCCByTag(doc, tagName)
+
+    If cc Is Nothing Then
+        If DEBUG_CC_MISSING_SUPP Then Debug.Print "Missing CC tag/title: " & tagName
+        Exit Sub
+    End If
+
+    UnlockCC cc
+    cc.Range.text = valueText
+End Sub
+
+Private Sub SetCCTextIfExistsAny(ByVal doc As Object, ByVal valueText As String, ParamArray names() As Variant)
+    Dim i As Long, nm As String
+    For i = LBound(names) To UBound(names)
+        nm = CStr(names(i))
+        If Len(nm) > 0 Then
+            SetCCTextIfExists doc, nm, valueText
+        End If
+    Next i
+End Sub
+
+Private Function GetCCByTag(ByVal doc As Object, ByVal want As String) As Object
+    On Error Resume Next
+    Dim cc As Object
+    Dim wantLower As String
+    wantLower = LCase$(want)
+
+    For Each cc In doc.ContentControls
+        If LCase$(Nz(cc.Tag, "")) = wantLower Or LCase$(Nz(cc.Title, "")) = wantLower Then
+            Set GetCCByTag = cc
+            Exit Function
+        End If
+    Next cc
+
+    Set cc = FindCCInShapes(doc.shapes, want)
+    If Not cc Is Nothing Then
+        Set GetCCByTag = cc
+        Exit Function
+    End If
+
+    Dim sec As Object, hf As Object, idx As Long
+    For Each sec In doc.Sections
+        For idx = 1 To 3
+            Set hf = sec.headers(idx)
+            If Not hf Is Nothing Then
+                For Each cc In hf.Range.ContentControls
+                    If LCase$(Nz(cc.Tag, "")) = wantLower Or LCase$(Nz(cc.Title, "")) = wantLower Then
+                        Set GetCCByTag = cc
+                        Exit Function
+                    End If
+                Next cc
+
+                Set cc = FindCCInShapes(hf.shapes, want)
+                If Not cc Is Nothing Then
+                    Set GetCCByTag = cc
+                    Exit Function
+                End If
+            End If
+
+            Set hf = sec.Footers(idx)
+            If Not hf Is Nothing Then
+                For Each cc In hf.Range.ContentControls
+                    If LCase$(Nz(cc.Tag, "")) = wantLower Or LCase$(Nz(cc.Title, "")) = wantLower Then
+                        Set GetCCByTag = cc
+                        Exit Function
+                    End If
+                Next cc
+
+                Set cc = FindCCInShapes(hf.shapes, want)
+                If Not cc Is Nothing Then
+                    Set GetCCByTag = cc
+                    Exit Function
+                End If
+            End If
+        Next idx
+    Next sec
+
+    Set GetCCByTag = Nothing
+End Function
+
+Private Function FindCCInShapes(ByVal shapes As Object, ByVal want As String) As Object
+    On Error Resume Next
+    Dim shp As Object, cc As Object
+    Dim wantLower As String
+    wantLower = LCase$(want)
+
+    For Each shp In shapes
+        If shp.TextFrame.HasText Then
+            For Each cc In shp.TextFrame.TextRange.ContentControls
+                If LCase$(Nz(cc.Tag, "")) = wantLower Or LCase$(Nz(cc.Title, "")) = wantLower Then
+                    Set FindCCInShapes = cc
+                    Exit Function
+                End If
+            Next cc
+        End If
+    Next shp
+End Function
+
+Private Function CleanWordTableText(ByVal s As String) As String
+    s = Replace(s, Chr$(13), "")
+    s = Replace(s, Chr$(7), "")
+    s = Replace(s, Chr$(160), "")
+    s = Replace(s, vbTab, "")
+    CleanWordTableText = Trim$(s)
+End Function
+
+Private Sub DeleteRowContainingCC(ByVal cc As Object)
+    On Error Resume Next
+    If cc Is Nothing Then Exit Sub
+
+    If cc.Range.Cells.Count > 0 Then
+        cc.Range.Cells(1).row.Delete
+    Else
+        cc.LockContents = False
+        cc.LockContentControl = False
+        cc.Delete
+    End If
+End Sub
+
+Private Function RSValue(ByVal rs As DAO.Recordset, ParamArray fieldNames() As Variant) As Variant
+    On Error GoTo Fail
+    Dim i As Long, nm As String
+    For i = LBound(fieldNames) To UBound(fieldNames)
+        nm = CStr(fieldNames(i))
+        If Len(nm) > 0 Then
+            If FieldExists(rs, nm) Then
+                RSValue = rs.fields(nm).value
+                Exit Function
+            End If
+        End If
+    Next i
+    RSValue = Null
+    Exit Function
+Fail:
+    RSValue = Null
+End Function
+
+Private Function FieldExists(ByVal rs As DAO.Recordset, ByVal fieldName As String) As Boolean
+    On Error GoTo ErrH
+    Dim tmp: tmp = rs.fields(fieldName).Name
+    FieldExists = True
+    Exit Function
+ErrH:
+    FieldExists = False
+End Function
+
+Private Function BuildAddressFromRecord(ByVal rs As DAO.Recordset, ParamArray fields() As Variant) As String
+    Dim i As Long, s As String, one As String
+    s = ""
+    For i = LBound(fields) To UBound(fields)
+        one = Nz(RSValue(rs, CStr(fields(i))), "")
+        one = Trim$(one)
+        If Len(one) > 0 Then
+            If Len(s) > 0 Then s = s & vbCrLf
+            s = s & one
+        End If
+    Next i
+    BuildAddressFromRecord = s
+End Function
+
+Private Function GetOrderIDForInvoice(ByVal InvoiceID As Long) As Long
+    GetOrderIDForInvoice = modInvoice_Common.GetOrderIDForInvoice(InvoiceID)
+End Function
+
+Private Function GetLatestDepositInvoiceRefForOrder(ByVal OrderID As Long) As String
+    GetLatestDepositInvoiceRefForOrder = modInvoice_Common.GetLatestDepositInvoiceRefForOrder(OrderID)
+End Function
+
+Private Function ParseAfterToken(ByVal s As String, ByVal token As String) As String
+    Dim p As Long
+    p = InStr(1, s, token, vbTextCompare)
+    If p = 0 Then Exit Function
+    ParseAfterToken = Trim$(Mid$(s, p + Len(token)))
+End Function
+
+Private Function ParseBetweenTokens(ByVal s As String, ByVal leftToken As String, ByVal rightToken As String) As String
+    Dim p1 As Long, p2 As Long
+    p1 = InStr(1, s, leftToken, vbTextCompare)
+    If p1 = 0 Then Exit Function
+    p1 = p1 + Len(leftToken)
+    p2 = InStr(p1, s, rightToken, vbTextCompare)
+    If p2 = 0 Then Exit Function
+    ParseBetweenTokens = Trim$(Mid$(s, p1, p2 - p1))
+End Function
+
+Private Function SqlMoney(ByVal v As Currency) As String
+    ' ensures decimal point for SQL, regardless of locale
+    SqlMoney = Replace(CStr(v), ",", ".")
+End Function

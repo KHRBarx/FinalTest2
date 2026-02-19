@@ -1,0 +1,101 @@
+Option Compare Database
+Option Explicit
+
+' mAudit_Unbound
+' Capture baseline values of specific controls
+Public Sub Capture_Unbound_Baseline(frm As Form, dict As Object, controlList As Variant, _
+                                    Optional ByVal append As Boolean = False)
+    If dict Is Nothing Then Set dict = CreateObject("Scripting.Dictionary")
+    If Not append Then
+        If dict.Count > 0 Then dict.RemoveAll
+    End If
+
+    Dim i As Long, nm As String
+    For i = LBound(controlList) To UBound(controlList)
+        nm = controlList(i)
+        dict(nm) = Nz(frm.Controls(nm).value, "")
+    Next i
+End Sub
+
+' controlMap: Array of Array("ControlName","FieldName","TableName","PkValue","IsCombo","DisplayColIndex")
+' Only TableName and PkValue are used for the AuditTrail call; FieldName is the column name in that table.
+Public Sub Log_Unbound_Changes(frm As Form, dict As Object, controlMap As Variant)
+    Dim i As Long, ctl As Control
+    Dim item As Variant
+    Dim ctlName As String, fld As String, tbl As String
+    Dim pk As Variant, isCombo As Boolean, dispIdx As Integer
+    Dim ov As Variant, nv As Variant, od As String, nd As String
+
+    If dict Is Nothing Then Set dict = CreateObject("Scripting.Dictionary")
+
+    For i = LBound(controlMap) To UBound(controlMap)
+        item = controlMap(i)
+        ' Expecting: Array("ControlName","FieldName","TableName","PkValue","IsCombo","DisplayColIndex")
+
+        ' Basic shape checks
+        If Not IsArray(item) Then GoTo NextItem
+        If UBound(item) < 3 Then GoTo NextItem   ' need at least first 4 elements
+
+        ctlName = CStr(item(0))
+        fld = CStr(item(1))
+        tbl = CStr(item(2))
+        pk = item(3)
+
+        ' Optional flags
+        isCombo = False
+        If UBound(item) >= 4 Then isCombo = CBool(item(4))
+
+        If UBound(item) >= 5 Then
+            dispIdx = CInt(item(5))
+        Else
+            dispIdx = 1   ' default to second column (zero-based)
+        End If
+
+        ' Control existence
+        On Error Resume Next
+        Set ctl = frm.Controls(ctlName)
+        If Err.Number <> 0 Then
+            Err.Clear
+            On Error GoTo 0
+            GoTo NextItem
+        End If
+        On Error GoTo 0
+
+        ' Values
+        nv = Nz(ctl.value, "")
+        If dict.exists(ctlName) Then
+            ov = Nz(dict(ctlName), "")
+        Else
+            ov = ""
+        End If
+
+        ' Friendly display text if combo
+        If isCombo Then
+            nd = Nz(ctl.Column(dispIdx), "")
+            od = ComboTextFromKey(ctl, ov, dispIdx)
+        Else
+            nd = CStr(nv)
+            od = CStr(ov)
+        End If
+
+        ' Log only if changed
+        If Nz(ov, "") <> Nz(nv, "") Then
+            AuditTrail tbl, fld, ov, nv, pk, False, od, nd
+        End If
+
+NextItem:
+    Next i
+
+    ' Refresh baseline after save
+    For i = LBound(controlMap) To UBound(controlMap)
+        item = controlMap(i)
+        If IsArray(item) And UBound(item) >= 0 Then
+            ctlName = CStr(item(0))
+            If frm.Controls(ctlName) Is Nothing Then
+                ' skip
+            Else
+                dict(ctlName) = Nz(frm.Controls(ctlName).value, "")
+            End If
+        End If
+    Next i
+End Sub

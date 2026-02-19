@@ -1,0 +1,15 @@
+Option Compare Database
+
+Public Function HtmlEncode(ByVal s As String) As String
+    If Len(s) = 0 Then HtmlEncode = "": Exit Function
+    s = Replace(s, "&", "&amp;")
+    s = Replace(s, "<", "&lt;")
+    s = Replace(s, ">", "&gt;")
+    s = Replace(s, """", "&quot;")
+    s = Replace(s, "'", "&#39;")
+    s = s & "" ' coerce to string if Variant/Null sneaks in
+    s = Replace(s, vbCrLf, "<br>")
+    s = Replace(s, vbCr, "<br>")
+    s = Replace(s, vbLf, "<br>")
+    HtmlEncode = s
+End Function

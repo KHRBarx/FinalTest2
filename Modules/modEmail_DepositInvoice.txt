@@ -1,0 +1,250 @@
+Option Compare Database
+Option Explicit
+
+'=========================================================
+' modEmail_DepositInvoice
+' Creates an Outlook draft for a DEPOSIT invoice using
+' t_EmailTemplate.TemplateName = "Deposit_Invoice"
+'
+' Placeholders supported (matching your existing pattern):
+'   [ContactEmail] [ContactName] [ClientName]a
+'   [InvoiceRef] [InvoiceNumber] [QuoteNumber]
+'   [PurchaseOrderRef] [DepositValue] [AccountsEmail]
+'=========================================================
+
+Public Sub DraftDepositInvoiceEmailFromTemplate( _
+    ByVal OrderID As Long, _
+    ByVal InvoiceID As Long, _
+    ByVal pdfPath As String, _
+    ByVal ContactID As Long, _
+    ByVal ClientID As Long, _
+    ByVal QuoteID As Long, _
+    ByVal PurchaseOrderRef As String, _
+    ByVal InvoiceREF As String, _
+    ByVal InvoiceNumber As Variant, _
+    Optional ByVal AccountsEmail As String = "", _
+    Optional ByVal TemplateName As String = "Deposit_Invoice")
+
+    On Error GoTo ErrHandler
+
+    Dim db As DAO.Database
+    Dim rsT As DAO.Recordset
+
+    Dim tmplTo As String, tmplCc As String, tmplBcc As String
+    Dim tmplSubj As String, tmplBody As String
+
+    Dim toAddr As String, ccAddr As String, bccAddr As String
+    Dim subj As String, bodyHtml As String, finalHtml As String
+
+    Dim ContactEmail As String
+    Dim contactName As String
+    Dim ClientName As String
+    Dim quoteNum As String
+    Dim depVal As String
+
+    Dim invDepIncVat As Currency
+    Dim invDepNet As Currency
+
+    Dim OutlookApp As Object
+    Dim OutlookMail As Object
+
+    '-----------------------------
+    ' Guardrails
+    '-----------------------------
+    If Len(Dir$(pdfPath)) = 0 Then
+        MsgBox "The PDF could not be found at:" & vbCrLf & pdfPath, vbExclamation, "Email not created"
+        Exit Sub
+    End If
+
+    Set db = CurrentDb()
+
+    '-----------------------------
+    ' Lookups (keep form-independent)
+    '-----------------------------
+    ContactEmail = ""
+    contactName = ""
+    ClientName = ""
+    quoteNum = ""
+
+    If ContactID <> 0 Then
+        ContactEmail = Nz(DLookup("EmailAddress", "t_Contacts", "ContactID=" & ContactID), "")
+        contactName = Nz(DLookup("ConcatName", "t_Contacts", "ContactID=" & ContactID), "")
+    End If
+
+    If ClientID <> 0 Then
+        ClientName = Nz(DLookup("Client", "t_Clients", "ClientID=" & ClientID), "")
+        If Len(ClientName) = 0 Then
+            ClientName = Nz(DLookup("CompanyName", "t_Clients", "ClientID=" & ClientID), "")
+        End If
+    End If
+
+    If QuoteID <> 0 Then
+        quoteNum = Nz(DLookup("QuoteNumber", "t_Quotations", "QuoteID=" & QuoteID), "")
+    End If
+
+    ' Deposit value: prefer invoice row values (most robust)
+    invDepIncVat = Nz(DLookup("InvoiceIncVAT", "t_Invoices", "InvoiceID=" & InvoiceID), 0)
+    invDepNet = Nz(DLookup("InvoiceValue", "t_Invoices", "InvoiceID=" & InvoiceID), 0)
+
+    If invDepIncVat > 0 Then
+        depVal = Format$(invDepIncVat, "£#,##0.00")
+    ElseIf invDepNet > 0 Then
+        depVal = Format$(invDepNet, "£#,##0.00")
+    Else
+        depVal = "£0.00"
+    End If
+
+    ' If AccountsEmail not provided, try a lookup (optional)
+    If Len(AccountsEmail) = 0 And ClientID <> 0 Then
+        AccountsEmail = Nz(DLookup("HeadOfficeEmail", "t_Clients", "ClientID=" & ClientID), "")
+    End If
+
+    '-----------------------------
+    ' Read template row
+    '-----------------------------
+    Set rsT = db.OpenRecordset( _
+        "SELECT * FROM t_EmailTemplate WHERE TemplateName=" & QuoteSQL(TemplateName), _
+        dbOpenSnapshot)
+
+    tmplTo = "": tmplCc = "": tmplBcc = "": tmplSubj = "": tmplBody = ""
+
+    If Not rsT.EOF Then
+        tmplTo = Nz(rsT!ToTemplate, "")
+        tmplCc = Nz(rsT!CCTemplate, "")
+        tmplBcc = Nz(rsT!BCCTemplate, "")
+        tmplSubj = Nz(rsT!SubjectTemplate, "")
+        tmplBody = Nz(rsT!BodyTemplate, "")
+    End If
+
+    rsT.Close
+    Set rsT = Nothing
+    Set db = Nothing
+
+    '-----------------------------
+    ' Apply placeholders
+    '-----------------------------
+    If Len(tmplTo) = 0 Then tmplTo = "[ContactEmail]"
+
+    toAddr = tmplTo
+    ccAddr = tmplCc
+    bccAddr = tmplBcc
+    subj = tmplSubj
+    bodyHtml = tmplBody
+
+    ReplaceToken toAddr, "[ContactEmail]", ContactEmail
+    ReplaceToken toAddr, "[ContactName]", contactName
+    ReplaceToken toAddr, "[ClientName]", ClientName
+    ReplaceToken toAddr, "[InvoiceRef]", InvoiceREF
+    ReplaceToken toAddr, "[InvoiceNumber]", Nz(InvoiceNumber, "")
+    ReplaceToken toAddr, "[QuoteNumber]", quoteNum
+    ReplaceToken toAddr, "[PurchaseOrderRef]", PurchaseOrderRef
+    ReplaceToken toAddr, "[DepositValue]", depVal
+    ReplaceToken toAddr, "[AccountsEmail]", AccountsEmail
+
+    ReplaceToken ccAddr, "[ContactEmail]", ContactEmail
+    ReplaceToken ccAddr, "[AccountsEmail]", AccountsEmail
+    ReplaceToken bccAddr, "[AccountsEmail]", AccountsEmail
+
+    ReplaceToken subj, "[ContactEmail]", ContactEmail
+    ReplaceToken subj, "[ContactName]", contactName
+    ReplaceToken subj, "[ClientName]", ClientName
+    ReplaceToken subj, "[InvoiceRef]", InvoiceREF
+    ReplaceToken subj, "[InvoiceNumber]", CStr(Nz(InvoiceNumber, ""))
+    ReplaceToken subj, "[QuoteNumber]", quoteNum
+    ReplaceToken subj, "[PurchaseOrderRef]", PurchaseOrderRef
+    ReplaceToken subj, "[DepositValue]", depVal
+    ReplaceToken subj, "[InvoiceValue]", depVal ' keep compatibility with any shared token usage
+
+    ReplaceToken bodyHtml, "[ContactEmail]", ContactEmail
+    ReplaceToken bodyHtml, "[ContactName]", contactName
+    ReplaceToken bodyHtml, "[ClientName]", ClientName
+    ReplaceToken bodyHtml, "[InvoiceRef]", InvoiceREF
+    ReplaceToken bodyHtml, "[InvoiceNumber]", CStr(Nz(InvoiceNumber, ""))
+    ReplaceToken bodyHtml, "[QuoteNumber]", quoteNum
+    ReplaceToken bodyHtml, "[PurchaseOrderRef]", PurchaseOrderRef
+    ReplaceToken bodyHtml, "[DepositValue]", depVal
+    ReplaceToken bodyHtml, "[InvoiceValue]", depVal ' compatibility
+    ReplaceToken bodyHtml, "[AccountsEmail]", AccountsEmail
+
+    '-----------------------------
+    ' Fallbacks
+    '-----------------------------
+    If Len(Trim$(toAddr)) = 0 Then toAddr = ContactEmail
+
+    If Len(Trim$(subj)) = 0 Then
+        subj = "Deposit invoice " & InvoiceREF
+        If Len(ClientName) > 0 Then subj = subj & " – " & ClientName
+    End If
+
+    If Len(Trim$(bodyHtml)) = 0 Then
+        bodyHtml = "<p>Dear " & HtmlSafe(contactName) & ",</p>" & _
+                   "<p>Please find attached our deposit invoice " & HtmlSafe(InvoiceREF) & ".</p>" & _
+                   "<p>Deposit due: <strong>" & HtmlSafe(depVal) & "</strong></p>"
+    End If
+
+    finalHtml = WrapBasicHtml(bodyHtml)
+
+    '-----------------------------
+    ' Create Outlook draft
+    '-----------------------------
+    On Error Resume Next
+    Set OutlookApp = GetObject(, "Outlook.Application")
+    If OutlookApp Is Nothing Then Set OutlookApp = CreateObject("Outlook.Application")
+    On Error GoTo ErrHandler
+
+    If OutlookApp Is Nothing Then
+        MsgBox "Outlook could not be started. Draft email was not created.", vbExclamation
+        Exit Sub
+    End If
+
+    Set OutlookMail = OutlookApp.CreateItem(0)
+    With OutlookMail
+        .To = toAddr
+        .cc = ccAddr
+        .BCC = bccAddr
+        .Subject = subj
+        .htmlBody = finalHtml
+        .Attachments.Add pdfPath
+        .Display
+    End With
+
+CleanExit:
+    On Error Resume Next
+    Set OutlookMail = Nothing
+    Set OutlookApp = Nothing
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Deposit invoice email draft failed: " & Err.Number & " - " & Err.Description, vbCritical
+    Resume CleanExit
+End Sub
+
+'-----------------------------
+' Helpers
+'-----------------------------
+Private Sub ReplaceToken(ByRef s As String, ByVal token As String, ByVal value As String)
+    If Len(s) = 0 Then Exit Sub
+    s = Replace(s, token, Nz(value, ""))
+End Sub
+
+Private Function QuoteSQL(ByVal s As String) As String
+    QuoteSQL = "'" & Replace(Nz(s, ""), "'", "''") & "'"
+End Function
+
+Private Function WrapBasicHtml(ByVal bodyHtml As String) As String
+    WrapBasicHtml = "<html><head>" & _
+        "<meta http-equiv='Content-Type' content='text/html; charset=utf-8'>" & _
+        "<style type='text/css'>" & _
+        "body, p, span, td {font-family:Ebrima, sans-serif !important;font-size:10pt !important;}" & _
+        "</style></head><body>" & bodyHtml & "</body></html>"
+End Function
+
+Private Function HtmlSafe(ByVal s As String) As String
+    Dim t As String
+    t = Nz(s, "")
+    t = Replace(t, "&", "&amp;")
+    t = Replace(t, "<", "&lt;")
+    t = Replace(t, ">", "&gt;")
+    t = Replace(t, """", "&quot;")
+    HtmlSafe = t
+End Function

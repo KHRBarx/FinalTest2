@@ -1,0 +1,178 @@
+Option Compare Database
+Option Explicit
+
+' === ENTRY POINT ===
+Public Sub Export_AllObjects_ToText()
+    ' Set this to your repo export folder (recommended)
+    ' Example: C:\Repos\access-app-source-test\access_src
+    Dim exportRoot As String
+    exportRoot = "C:\Repos\access-app-source-test\access_src"   ' <-- CHANGE THIS
+
+    ExportAllObjects exportRoot
+    MsgBox "Export complete:" & vbCrLf & exportRoot, vbInformation
+End Sub
+
+' === CORE EXPORT ===
+Public Sub ExportAllObjects(ByVal exportRoot As String)
+    Dim pForms As String, pReports As String, pQueries As String, pMacros As String
+    Dim pModules As String, pClasses As String
+
+    pForms = exportRoot & "\Forms"
+    pReports = exportRoot & "\Reports"
+    pQueries = exportRoot & "\Queries"
+    pMacros = exportRoot & "\Macros"
+    pModules = exportRoot & "\Modules"
+    pClasses = exportRoot & "\ClassModules"
+
+    EnsureFolderRecursive exportRoot
+    EnsureFolderRecursive pForms
+    EnsureFolderRecursive pReports
+    EnsureFolderRecursive pQueries
+    EnsureFolderRecursive pMacros
+    EnsureFolderRecursive pModules
+    EnsureFolderRecursive pClasses
+
+    ExportForms pForms
+    ExportReports pReports
+    ExportQueries_SaveAsText pQueries
+    ExportMacros pMacros
+    ExportStdModules pModules
+    ExportClassModules pClasses
+End Sub
+
+Private Sub ExportForms(ByVal outFolder As String)
+    Dim ao As AccessObject
+    For Each ao In CurrentProject.AllForms
+        If ao.IsLoaded Then DoCmd.Close acForm, ao.Name, acSaveNo
+        Application.SaveAsText acForm, ao.Name, outFolder & "\" & ao.Name & ".txt"
+    Next ao
+End Sub
+
+Private Sub ExportReports(ByVal outFolder As String)
+    Dim ao As AccessObject
+    For Each ao In CurrentProject.AllReports
+        If ao.IsLoaded Then DoCmd.Close acReport, ao.Name, acSaveNo
+        Application.SaveAsText acReport, ao.Name, outFolder & "\" & ao.Name & ".txt"
+    Next ao
+End Sub
+
+Private Sub ExportMacros(ByVal outFolder As String)
+    Dim ao As AccessObject
+    For Each ao In CurrentProject.AllMacros
+        Application.SaveAsText acMacro, ao.Name, outFolder & "\" & ao.Name & ".txt"
+    Next ao
+End Sub
+
+Private Sub ExportStdModules(ByVal outFolder As String)
+    Dim ao As AccessObject
+    For Each ao In CurrentProject.AllModules
+        ' Standard modules only (class modules are handled separately)
+        If IsClassModuleName(ao.Name) = False Then
+            Application.SaveAsText acModule, ao.Name, outFolder & "\" & ao.Name & ".txt"
+        End If
+    Next ao
+End Sub
+
+Private Sub ExportClassModules(ByVal outFolder As String)
+    Dim ao As AccessObject
+    For Each ao In CurrentProject.AllModules
+        If IsClassModuleName(ao.Name) Then
+            Application.SaveAsText acModule, ao.Name, outFolder & "\" & ao.Name & ".txt"
+        End If
+    Next ao
+End Sub
+
+Private Function IsClassModuleName(ByVal moduleName As String) As Boolean
+    ' Heuristic: Access exposes ALL modules via CurrentProject.AllModules.
+    ' Many class modules start with "c_" or are form/report class modules.
+    ' For source control exports, treating form/report modules as part of the form/report text is fine.
+    ' This function is conservative and only splits by naming convention.
+    IsClassModuleName = (LCase$(Left$(moduleName, 2)) = "c_")
+End Function
+
+Private Function IncludeQuery(ByVal qName As String) As Boolean
+    ' Skip system / temp queries
+    If Left$(qName, 4) = "MSys" Then
+        IncludeQuery = False
+    ElseIf Left$(qName, 1) = "~" Then
+        IncludeQuery = False
+    ElseIf LCase$(Left$(qName, 4)) = "sq__" Then
+        IncludeQuery = False
+    Else
+        IncludeQuery = True
+    End If
+End Function
+
+' === FOLDER HELPERS ===
+Private Sub EnsureFolderRecursive(ByVal folderPath As String)
+    Dim parts() As String
+    Dim build As String
+    Dim i As Long
+
+    folderPath = Replace(folderPath, "/", "\")
+    If Right$(folderPath, 1) = "\" Then folderPath = Left$(folderPath, Len(folderPath) - 1)
+    If Len(folderPath) = 0 Then Exit Sub
+
+    parts = Split(folderPath, "\")
+
+    ' UNC path: \\Server\Share\...
+    If Left$(folderPath, 2) = "\\" Then
+        build = "\\" & parts(2) & "\" & parts(3)
+        For i = 4 To UBound(parts)
+            build = build & "\" & parts(i)
+            If Len(Dir(build, vbDirectory)) = 0 Then MkDir build
+        Next i
+    Else
+        build = parts(0) ' e.g. C:
+        For i = 1 To UBound(parts)
+            build = build & "\" & parts(i)
+            If Len(Dir(build, vbDirectory)) = 0 Then MkDir build
+        Next i
+    End If
+End Sub
+
+Private Function SafeFileName(ByVal s As String) As String
+    ' Replace characters invalid in Windows filenames
+    Dim bad As Variant, i As Long
+    bad = Array("<", ">", ":", """", "/", "\", "|", "?", "*", ";")
+    SafeFileName = Trim$(s)
+
+    For i = LBound(bad) To UBound(bad)
+        SafeFileName = Replace(SafeFileName, CStr(bad(i)), "_")
+    Next i
+
+    ' Avoid empty names
+    If Len(SafeFileName) = 0 Then SafeFileName = "unnamed"
+
+    ' Optional: keep file names manageable
+    If Len(SafeFileName) > 120 Then SafeFileName = Left$(SafeFileName, 120)
+End Function
+
+Private Sub ExportQueries_SaveAsText(ByVal outFolder As String)
+    Dim qd As DAO.QueryDef
+    Dim safeName As String
+    Dim f As Integer
+    Dim manifest As String
+
+    manifest = outFolder & "\_query_filename_manifest.csv"
+    f = FreeFile
+    Open manifest For Output As #f
+    Print #f, """QueryName"",""FileName"""
+
+    For Each qd In CurrentDb.QueryDefs
+        If IncludeQuery(qd.Name) Then
+            safeName = SafeFileName(qd.Name)
+            Print #f, Csv(qd.Name) & "," & Csv(safeName & ".txt")
+            Application.SaveAsText acQuery, qd.Name, outFolder & "\" & safeName & ".txt"
+        End If
+    Next qd
+
+    Close #f
+End Sub
+
+Private Function Csv(ByVal v As Variant) As String
+    Dim s As String
+    s = Nz(v, "")
+    s = Replace(s, """", """""")
+    Csv = """" & s & """"
+End Function

@@ -1,0 +1,101 @@
+Option Compare Database
+Option Explicit
+
+'------------- CONFIG -------------
+Private Const AUDIT_TABLE As String = "t_Audit"
+' Optional: fields to ignore on bound forms (ControlSource names)
+Private IGNORE_FIELDS As String
+' e.g. "ModifiedOn|ModifiedBy|LastViewed"
+' Set at startup or in an AutoExec:
+'   IGNORE_FIELDS = "ModifiedOn|ModifiedBy"
+'----------------------------------
+
+Public Sub Audit_SetIgnoreFields(ByVal pipeList As String)
+    IGNORE_FIELDS = pipeList
+End Sub
+
+Public Sub Audit_Bound_Form(frm As Form, tableName As String, pkValue As Variant)
+    Dim ctl As Control
+    Dim ov As Variant, nv As Variant
+    For Each ctl In frm.Controls
+        If ShouldAuditControl(ctl) Then
+            On Error Resume Next
+            ov = ctl.oldValue
+            If Err.Number <> 0 Then ov = Null    ' new record before first save
+            Err.Clear
+            On Error GoTo 0
+
+            nv = ctl.value
+
+            If Nz(ov, "") <> Nz(nv, "") Then
+                AuditTrail tableName, ctl.ControlSource, ov, nv, pkValue, False
+            End If
+        End If
+    Next ctl
+End Sub
+
+Private Function ShouldAuditControl(ctl As Control) As Boolean
+    ' Only consider input controls that actually bind to a field
+    Dim isInput As Boolean
+    isInput = (ctl.ControlType = acTextBox Or _
+               ctl.ControlType = acComboBox Or _
+               ctl.ControlType = acListBox Or _
+               ctl.ControlType = acCheckBox)
+    If Not isInput Then Exit Function
+
+    ' Now it’s safe to read ControlSource
+    Dim src As String
+    On Error Resume Next
+    src = ctl.ControlSource & ""
+    On Error GoTo 0
+    If Len(src) = 0 Then Exit Function          ' unbound control (often used for filtering)
+    If Left$(src, 1) = "=" Then Exit Function   ' calculated control/expression – skip
+
+    ' Ignore any fields you’ve listed
+    Dim notIgnored As Boolean
+    notIgnored = (InStr(1, "|" & IGNORE_FIELDS & "|", "|" & src & "|", vbTextCompare) = 0)
+
+    ShouldAuditControl = (ctl.enabled And Not ctl.Locked And notIgnored)
+End Function
+
+
+Public Sub AuditTrail(tableName As String, fieldName As String, _
+                      oldValue As Variant, newValue As Variant, _
+                      recordID As Variant, isDelete As Boolean, _
+                      Optional oldDisplay As String = "", Optional newDisplay As String = "")
+
+    On Error GoTo EH
+    Dim sql As String
+
+    sql = "INSERT INTO " & AUDIT_TABLE & " (" & _
+          "WhenStamp, UserName, TableName, FieldName, OldValue, NewValue, " & _
+          "RecordID, IsDelete, OldDisplay, NewDisplay) VALUES (" & _
+          "#" & Format(Now(), "yyyy-mm-dd hh:nn:ss") & "#, " & _
+          "'" & Replace(Environ$("Username"), "'", "''") & "', " & _
+          "'" & Replace(tableName, "'", "''") & "', " & _
+          "'" & Replace(Nz(fieldName, ""), "'", "''") & "', " & _
+          "'" & Replace(Nz(CStr(oldValue), ""), "'", "''") & "', " & _
+          "'" & Replace(Nz(CStr(newValue), ""), "'", "''") & "', " & _
+          Nz(recordID, 0) & ", " & IIf(isDelete, "True", "False") & ", " & _
+          "'" & Replace(Nz(oldDisplay, ""), "'", "''") & "', " & _
+          "'" & Replace(Nz(newDisplay, ""), "'", "''") & "');"
+
+    CurrentDb.Execute sql, dbFailOnError
+    Exit Sub
+EH:
+    ' Optional: swallow or write to a silent error log table
+End Sub
+
+'--- Combo helper (works for both bound & unbound usage) ---
+Public Function ComboTextFromKey(cbo As ComboBox, keyVal As Variant, _
+                                 Optional displayCol As Integer = 1) As String
+    Dim i As Long, boundIdx As Long
+    If IsNull(keyVal) Then Exit Function
+    boundIdx = cbo.BoundColumn - 1
+    For i = 0 To cbo.ListCount - 1
+        If Nz(cbo.Column(boundIdx, i), "") = Nz(keyVal, "") Then
+            ComboTextFromKey = Nz(cbo.Column(displayCol, i), "")
+            Exit Function
+        End If
+    Next i
+End Function

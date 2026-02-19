@@ -1,0 +1,1427 @@
+Option Compare Database
+Option Explicit
+
+Private Const QUOTE_KEY As String = "PHYSICAL"
+
+'Word constants (late binding)
+Private Const wdFormatXMLDocument As Long = 12
+Private Const wdDoNotSaveChanges As Long = 0
+Private Const wdExportFormatPDF As Long = 17
+Private Const wdExportOptimizeForPrint As Long = 0
+Private Const wdExportAllDocument As Long = 0
+Private Const wdExportDocumentContent As Long = 0
+Private Const wdExportCreateNoBookmarks As Long = 0
+
+Private Const INTRO_SERVICE_LABEL As String = "Physical"
+
+'=============================
+' Public entry point (Physical)
+'=============================
+Public Function GenerateQuote_Physical( _
+    ByVal QuoteID As Long, _
+    ByRef OutDocxPath As String, _
+    ByRef OutPdfPath As String, _
+    Optional ByVal LeaveWordOpen As Boolean = True _
+) As Boolean
+
+    On Error GoTo EH
+
+    Dim db As DAO.Database
+    Dim rsH As DAO.Recordset
+    Dim rsSpec As DAO.Recordset
+    Dim rsSC As DAO.Recordset     'kept for parity (Physical has none; will remain Nothing)
+    Dim rsRpt As DAO.Recordset    'kept for parity (not used in Resistance either)
+    Dim rsAdd As DAO.Recordset
+
+    Dim wordApp As Object
+    Dim doc As Object
+
+    Dim TemplatePath As String
+    Dim outFolder As String
+    Dim baseName As String
+
+    '--- Force QuoteDateIssued = today (per requirement) ---
+    Set db = CurrentDb
+    db.Execute "UPDATE t_Quotations SET QuoteDateIssued = Date() WHERE QuoteID=" & QuoteID, dbFailOnError
+
+    '--- Ensure TempVars for existing report/query pattern ---
+    TempVars!QuoteID = QuoteID
+
+    '--- Header dataset (single row) ---
+    Set rsH = OpenSnapshotByQuoteID(db, "q_IssuedQuoteDocument", QuoteID)
+    If rsH.EOF Then
+        Err.Raise vbObjectError + 510, , "q_IssuedQuoteDocument returned no rows for QuoteID=" & QuoteID
+    End If
+
+    '--- Build output paths (same folder + naming convention) ---
+    outFolder = GetQuoteFolderPath(QuoteID)
+    If Right$(outFolder, 1) <> "\" Then outFolder = outFolder & "\"
+    EnsureFolderExists outFolder
+
+    baseName = Nz(rsH.fields("QuoteNumber").value, "")
+    If Len(baseName) = 0 Then
+        Err.Raise vbObjectError + 511, , "QuoteNumber is blank for QuoteID=" & QuoteID
+    End If
+
+    baseName = baseName & "_" & Nz(rsH.fields("VNumber").value, "")
+    OutDocxPath = outFolder & baseName & ".docx"
+    OutPdfPath = outFolder & baseName & ".pdf"
+
+    '--- Template (Physical) ---
+    
+    'If the NAME of the template changes, change the 'Physical Quote' string below to that name.
+    TemplatePath = DLookup("TemplatePath", "t_TemplateDocuments", "Description = 'Physical Quote'")
+    If Dir(TemplatePath) = "" Then
+        Err.Raise vbObjectError + 512, , "Template not found: " & TemplatePath
+    End If
+
+    '--- Spin up Word ---
+    Set wordApp = CreateObject("Word.Application")
+    wordApp.Visible = True
+
+    Set doc = wordApp.Documents.Add(TemplatePath)
+
+    '--- Populate header/common blocks ---
+    FillHeaderBlocks doc, rsH
+    FillUserAndTnCFields doc
+
+    '--- Populate sections ---
+    ' Specimens (grouped)
+    Set rsSpec = OpenSnapshotByQuoteID(db, "q_SpecimenCountPhysical", QuoteID)
+    FillSection_Specimens doc, rsSpec, rsH
+
+    ' Supporting Constructions: Physical quotes have none.
+    ' Keep the same robustness pattern: ensure section removed if present (template should not include it).
+    RemoveSectionTableAndHeading doc, "Section_SupportingConstructions"
+    Set rsSC = Nothing
+
+    ' Additional Reports (driven from header fields in q_IssuedQuoteDocument)
+    FillSection_Reports_ResistanceFromHeader doc, rsH
+
+    ' Additionals (Waste + Thermocouples, driven by q_Additionals)
+    Set rsAdd = OpenSnapshotByQuoteID(db, "q_Additionals", QuoteID)
+    FillSection_Additionals doc, rsAdd
+
+    '--- Financial footer CCs (no parent Section_Financials) ---
+    ' Pass rsSC as Nothing (Physical has no SC)
+    FillFinancials doc, rsH, rsSpec, Nothing, Nothing, rsAdd
+
+    '--- Save DOCX then export PDF ---
+    doc.SaveAs2 fileName:=OutDocxPath, FileFormat:=wdFormatXMLDocument
+    ExportDocToPDF doc, OutPdfPath
+
+    ' Leave Word open per requirement
+    If Not LeaveWordOpen Then
+        doc.Close wdDoNotSaveChanges
+        wordApp.Quit
+    End If
+
+    GenerateQuote_Physical = True
+
+CleanUp:
+    On Error Resume Next
+    If Not rsH Is Nothing Then rsH.Close
+    If Not rsSpec Is Nothing Then rsSpec.Close
+    If Not rsSC Is Nothing Then rsSC.Close
+    If Not rsAdd Is Nothing Then rsAdd.Close
+    'If Not rsRpt Is Nothing Then rsRpt.Close
+    Set rsH = Nothing: Set rsSpec = Nothing: Set rsSC = Nothing: Set rsAdd = Nothing: Set rsRpt = Nothing
+    Set db = Nothing
+    Exit Function
+
+EH:
+    GenerateQuote_Physical = False
+    MsgBox "Physical quote generation failed:" & vbCrLf & Err.Number & " - " & Err.Description, vbExclamation
+    Resume CleanUp
+End Function
+
+
+'=============================
+' Header/common blocks
+'=============================
+Private Sub FillHeaderBlocks(ByVal doc As Object, ByVal rsH As DAO.Recordset)
+
+    'DepositPercent from t_Clients.DepositPercent (ClientID PK)
+    Dim ClientID As Long
+    ClientID = Nz(GetFieldAny(rsH, "ClientID"), 0)
+
+    'Quote identity
+    SetCCTextIfExists doc, "ClientCode", Nz(rsH!ClientCode, "")
+    SetCCTextIfExists doc, "QuoteNumber", Nz(rsH!QuoteNumber, "")
+    SetCCTextIfExists doc, "VNumber", Nz(rsH!VNumber, "")
+    SetCCTextIfExists doc, "QuoteDate", Format$(Nz(rsH!QuoteDateIssued, Date), "dd mmm yyyy")
+
+    'Client + contact
+    SetCCTextIfExists doc, "Client", Nz(rsH!Client, "")
+    SetCCTextIfExists doc, "ContactName", Nz(rsH!ConcatName, "")
+
+    'Contact address (Address1Line1..6 from q_IssuedQuoteDocument)
+    SetCCTextIfExists doc, "ClientAddress", BuildAddressBlock(rsH)
+    
+    'Quote intro (Formality: 1 = Formal, 2 = Unaccredited)
+    ApplyQuoteIntro doc, rsH, QUOTE_KEY
+
+    'Validity display: "1 month" / "n months"
+    Dim v As Long
+    v = Nz(rsH!Validity, 0)
+    If v > 0 Then
+        If v = 1 Then
+            SetCCTextIfExists doc, "Validity", "1 month"
+        Else
+            SetCCTextIfExists doc, "Validity", CStr(v) & " months"
+        End If
+    Else
+        SetCCTextIfExists doc, "Validity", ""
+    End If
+
+    '--- DepositPercent (footer CC) ---
+    Dim qid As Long
+    qid = Nz(GetFieldAny(rsH, "QuoteID"), 0)
+
+    If qid = 0 Then
+        On Error Resume Next
+        qid = Nz(TempVars("QuoteID").value, 0)
+        On Error GoTo 0
+    End If
+
+    'ClientID: prefer rsH, otherwise fall back to t_Quotations
+    If ClientID = 0 And qid <> 0 Then
+        ClientID = Nz(DLookup("ClientID", "t_Quotations", "QuoteID=" & qid), 0)
+    End If
+
+    Dim depPct As Double
+    depPct = 0#
+
+    If ClientID <> 0 Then
+        depPct = Nz(DLookup("DepositPercent", "t_Clients", "ClientID=" & ClientID), 0#)
+
+        'Handle 0.1 vs 10 storage without assuming
+        If depPct > 1# Then depPct = depPct / 100#
+    End If
+
+    Debug.Print "DepositPercent: QuoteID=" & qid & " ClientID=" & ClientID & " depPct=" & depPct
+
+    If depPct <= 0# Then
+        SetFooterCCTextIfExists doc, "DepositPercent", CCBlank()
+    Else
+        SetFooterCCTextIfExists doc, "DepositPercent", FormatPercentSafe(depPct)
+    End If
+
+End Sub
+
+'=============================
+' Section: Specimens (grouped)
+'=============================
+Private Sub FillSection_Specimens(ByVal doc As Object, ByVal rs As DAO.Recordset, ByVal rsH As DAO.Recordset)
+    If rs.EOF Then
+        RemoveSectionTableAndHeading doc, "Section_TestSpecimen"
+        Exit Sub
+    End If
+
+    Dim disc As Double
+    disc = CDbl(Nz(GetFieldAny(rsH, "Discount"), 0#)) ' stored as 0.1 for 10%
+
+    Dim secCC As Object, tbl As Object, templateRowIdx As Long
+    Set secCC = GetCCByTag(doc, "Section_TestSpecimen")
+    If secCC Is Nothing Then Exit Sub
+    If secCC.Range.Tables.Count = 0 Then Exit Sub
+
+    Set tbl = secCC.Range.Tables(1)
+    templateRowIdx = FindTemplateRowIndex(tbl, "Spec_")
+
+    'Clear any existing data rows beyond the template row
+    DeleteRowsAfter tbl, templateRowIdx
+
+    rs.MoveFirst
+    Dim rowIdx As Long
+    rowIdx = templateRowIdx
+
+    Dim anySpecial As Boolean
+    anySpecial = False
+
+    Do While Not rs.EOF
+        If rowIdx > templateRowIdx Then
+            CloneRowFormatting tbl, templateRowIdx, rowIdx
+        End If
+
+        Dim isSpecial As Boolean
+        isSpecial = CBool(Nz(GetFieldAny(rs, "SpecialPrice"), False))
+        If isSpecial Then anySpecial = True
+
+        FillSpecimenRow tbl.rows(rowIdx), rs, disc, isSpecial
+
+        rowIdx = rowIdx + 1
+        rs.MoveNext
+    Loop
+
+    'Discount column header handling:
+    ' - If no discount at all, blank the header (your existing behavior)
+    ' - If ANY row is SpecialPrice=True, blank the header (per requirement)
+    Dim discCol As Long
+    discCol = FindColIndexByRowTag(tbl.rows(templateRowIdx), "Spec_Discount")
+    If discCol > 0 Then
+        If disc <= 0# Or anySpecial Then
+            tbl.rows(1).Cells(discCol).Range.text = CCBlank()
+        End If
+    End If
+
+    'SpecialPrice footnote CC (document-level)
+    If anySpecial Then
+        SetCCTextIfExists doc, "SpecialPrice", "* Non-Standard pricing agreed between Attain RTC and the Client"
+    Else
+        SetCCTextIfExists doc, "SpecialPrice", CCBlank()
+    End If
+
+    'Remove any trailing blank rows left in the template
+    TrimBlankTrailingRows tbl, templateRowIdx, "Spec_"
+
+End Sub
+
+Private Sub FillSpecimenRow( _
+    ByVal rowObj As Object, _
+    ByVal rs As DAO.Recordset, _
+    ByVal disc As Double, _
+    ByVal isSpecialPrice As Boolean _
+)
+    Dim Qty As Long
+    Dim feeUnit As Currency
+    Dim grossLine As Currency
+    Dim netLine As Currency
+
+    Qty = Nz(GetFieldAny(rs, "CountOfSpecimenID", "Qty", "Spec_TestQty"), 0)
+    feeUnit = Nz(GetFieldAny(rs, "TestPrice", "Spec_TestFee"), 0)
+
+    grossLine = Nz(GetFieldAny(rs, "TotalFee", "Total", ""), 0)
+    If grossLine = 0 And Qty > 0 Then grossLine = feeUnit * Qty
+
+    'IMPORTANT: netLine logic unchanged (still applies global disc to grossLine)
+    netLine = Round(grossLine * (1 - disc), 2)
+
+    'Department label changed for Physical
+    SetRowCC rowObj, "Spec_Department", "Physical"
+
+    SetRowCC rowObj, "Spec_Standards", Nz(GetFieldAny(rs, "Test Standard", "Standards", "Spec_Standards"), "")
+    SetRowCC rowObj, "Test_SampleName", Nz(GetFieldAny(rs, "SampleName", "Test_SampleName"), "")
+    SetRowCC rowObj, "Spec_SampleType", Nz(GetFieldAny(rs, "SampleType", "Spec_SampleType"), "")
+    SetRowCC rowObj, "Spec_TestLength", Nz(GetFieldAny(rs, "Spec_TestLength", "TestLength", "Test Length", "No Days", "NumDays", "Spec_NoDays"), "")
+    SetRowCC rowObj, "Spec_TestQty", IIf(Qty = 0, "", CStr(Qty))
+    SetRowCC rowObj, "Spec_TestFee", FormatCurrencySafe(feeUnit)
+
+    'Discount display rule:
+    ' - SpecialPrice=True => show asterisk
+    ' - Else show percent if disc > 0
+    ' - Else blank
+    If isSpecialPrice Then
+        SetRowCC rowObj, "Spec_Discount", "*"
+    ElseIf Nz(disc, 0#) > 0# Then
+        SetRowCC rowObj, "Spec_Discount", FormatPercentSafe(disc)
+    Else
+        SetRowCC rowObj, "Spec_Discount", CCBlank()
+    End If
+
+    SetRowCC rowObj, "Spec_Total", FormatCurrencySafe(netLine)
+End Sub
+
+
+'=============================
+' Section: Supporting Constructions (kept for parity; not used by Physical)
+'=============================
+Private Sub FillSection_SupportingConstructions(ByVal doc As Object, ByVal rs As DAO.Recordset, ByVal rsH As DAO.Recordset)
+    If rs.EOF Then
+        RemoveSectionTableAndHeading doc, "Section_SupportingConstructions"
+        Exit Sub
+    End If
+
+    Dim disc As Double
+    disc = Nz(rsH!Discount, 0#)
+
+    Dim secCC As Object, tbl As Object, templateRowIdx As Long
+    Set secCC = GetCCByTag(doc, "Section_SupportingConstructions")
+    If secCC Is Nothing Then Exit Sub
+    If secCC.Range.Tables.Count = 0 Then Exit Sub
+
+    Set tbl = secCC.Range.Tables(1)
+    templateRowIdx = FindTemplateRowIndex(tbl, "SC_")
+
+    If disc <= 0 Then
+        Dim discCol As Long
+        discCol = FindColIndexByRowTag(tbl.rows(templateRowIdx), "SC_Discount")
+        If discCol > 0 Then
+            tbl.rows(1).Cells(discCol).Range.text = CCBlank()
+        End If
+    End If
+
+    DeleteRowsAfter tbl, templateRowIdx
+
+    rs.MoveFirst
+    Dim rowIdx As Long
+    rowIdx = templateRowIdx
+
+    Do While Not rs.EOF
+        If rowIdx > templateRowIdx Then
+            CloneRowFormatting tbl, templateRowIdx, rowIdx
+        End If
+
+        FillSCRow tbl.rows(rowIdx), rs, disc
+
+        rowIdx = rowIdx + 1
+        rs.MoveNext
+    Loop
+End Sub
+
+Private Sub FillSCRow(ByVal rowObj As Object, ByVal rs As DAO.Recordset, ByVal disc As Double)
+    Dim Qty As Long
+    Dim feeUnit As Currency
+    Dim grossLine As Currency
+    Dim netLine As Currency
+    Dim candidate As Currency
+
+    Qty = Nz(GetFieldAny(rs, "SC_TestQty", "Qty", "CountOfTestID"), 0)
+
+    feeUnit = Nz(GetFieldAny(rs, "SC_Fee", "SCPrice"), 0)
+    grossLine = Nz(GetFieldAny(rs, "Total", "TotalFee"), 0)
+
+    'If Total is missing/zero, compute it
+    If grossLine = 0 And Qty > 0 Then grossLine = Round(feeUnit * Qty, 2)
+
+    'If Total looks like a unit fee (common when query changed), convert to fee*qty
+    If Qty > 1 And feeUnit > 0 Then
+        candidate = Round(feeUnit * Qty, 2)
+        If Abs(grossLine - feeUnit) < 0.01 Then grossLine = candidate
+    End If
+
+    netLine = Round(grossLine * (1 - disc), 2)
+
+    SetRowCC rowObj, "SC_Department", "Physical"
+    SetRowCC rowObj, "SC_Standards", Nz(GetFieldAny(rs, "SC_Standards", "Standards"), "")
+    SetRowCC rowObj, "SC_SampleName", Nz(GetFieldAny(rs, "SC_SampleName", "SampleName"), "")
+    SetRowCC rowObj, "SC_Type", Nz(GetFieldAny(rs, "SCMaterial", "SC_Type", "SCType"), "")
+    SetRowCC rowObj, "SC_TestLength", Nz(GetFieldAny(rs, "SC_TestLength", "TestLength", "Test Length", "SC_NoDays", "NumDays"), "")
+    SetRowCC rowObj, "SC_TestQty", IIf(Qty = 0, "", CStr(Qty))
+    SetRowCC rowObj, "SC_Fee", FormatCurrencySafe(feeUnit)
+
+    If Nz(disc, 0) > 0 Then
+        SetRowCC rowObj, "SC_Discount", FormatPercentSafe(Nz(disc, 0))
+    Else
+        SetRowCC rowObj, "SC_Discount", CCBlank()
+    End If
+
+    SetRowCC rowObj, "SC_Total", FormatCurrencySafe(netLine)
+End Sub
+
+
+Private Sub DeleteRowContainingCC(ByVal doc As Object, ByVal tagName As String)
+    On Error Resume Next
+
+    Dim cc As Object
+    Set cc = GetCCByTag(doc, tagName)
+    If cc Is Nothing Then Exit Sub
+
+    UnlockCC cc
+
+    If cc.Range.Tables.Count > 0 Then
+        cc.Range.Cells(1).row.Delete
+    Else
+        'Not in a table; fall back to clearing the control
+        cc.Range.text = CCBlank()
+    End If
+End Sub
+
+
+'=============================
+' Section: Additionals (Waste + Thermocouples)
+'=============================
+Private Sub FillSection_Additionals(ByVal doc As Object, ByVal rsAdd As DAO.Recordset)
+
+    If rsAdd Is Nothing Or rsAdd.EOF Then
+        RemoveSectionTableAndHeading doc, "Section_Additionals"
+        Exit Sub
+    End If
+
+    Dim lines As Collection
+    Set lines = New Collection
+
+    rsAdd.MoveFirst
+
+    '---------------------------------
+    ' 1) Waste disposal (quote-level)
+    '---------------------------------
+    Dim WasteCost As Currency
+    WasteCost = Nz(GetFieldAny(rsAdd, "WasteCost", "WastePrice"), 0)
+
+    If WasteCost <> 0 Then
+        lines.Add Array("Waste disposal", vbNullString, 1, WasteCost, WasteCost)
+    End If
+
+    '---------------------------------
+    ' 2) Additional Thermocouples (per specimen)
+    '---------------------------------
+    Do While Not rsAdd.EOF
+        Dim tcQty As Long
+        Dim TCPrice As Currency
+        Dim Detail As String
+        Dim specNo As Variant
+
+        tcQty = Nz(GetFieldAny(rsAdd, "AdditionalTCs"), 0)
+        TCPrice = Nz(GetFieldAny(rsAdd, "TCPrice"), 0)
+
+        If tcQty > 0 And TCPrice > 0 Then
+            Detail = Nz(GetFieldAny(rsAdd, "SampleName"), vbNullString)
+            If Len(Trim$(Detail)) = 0 Then
+                specNo = GetFieldAny(rsAdd, "SpecimenNumber")
+                If Not IsNull(specNo) Then
+                    Detail = "Specimen " & CStr(specNo)
+                Else
+                    Detail = vbNullString
+                End If
+            End If
+
+            lines.Add Array("Additional thermocouples", Detail, tcQty, TCPrice, Round(tcQty * TCPrice, 2))
+        End If
+
+        rsAdd.MoveNext
+    Loop
+
+    If lines.Count = 0 Then
+        RemoveSectionTableAndHeading doc, "Section_Additionals"
+        Exit Sub
+    End If
+
+    '---------------------------------
+    ' Render table
+    '---------------------------------
+    Dim secCC As Object, tbl As Object, templateRowIdx As Long
+    Set secCC = GetCCByTag(doc, "Section_Additionals")
+    If secCC Is Nothing Then Exit Sub
+    If secCC.Range.Tables.Count = 0 Then Exit Sub
+
+    Set tbl = secCC.Range.Tables(1)
+    templateRowIdx = FindTemplateRowIndex(tbl, "Add_")
+    DeleteRowsAfter tbl, templateRowIdx
+
+    'No column header required for the detail column (col 2)
+    On Error Resume Next
+    If tbl.Columns.Count >= 5 Then
+        tbl.rows(1).Cells(2).Range.text = CCBlank()
+    End If
+    On Error GoTo 0
+
+    Dim i As Long, rowIdx As Long
+    rowIdx = templateRowIdx
+
+    For i = 1 To lines.Count
+        If rowIdx > templateRowIdx Then
+            CloneRowFormatting tbl, templateRowIdx, rowIdx
+        End If
+
+        Dim arr
+        arr = lines(i)
+
+        SetRowCC tbl.rows(rowIdx), "Add_Type", CStr(arr(0))
+
+        'Detail column (no CC; write directly)
+        On Error Resume Next
+        If tbl.Columns.Count >= 5 Then
+            tbl.rows(rowIdx).Cells(2).Range.text = CStr(arr(1))
+        End If
+        On Error GoTo 0
+
+        SetRowCC tbl.rows(rowIdx), "Add_Qty", CStr(arr(2))
+        SetRowCC tbl.rows(rowIdx), "Add_Fee", FormatCurrencySafe(CCur(arr(3)))
+        SetRowCC tbl.rows(rowIdx), "Add_Total", FormatCurrencySafe(CCur(arr(4)))
+
+        rowIdx = rowIdx + 1
+    Next i
+
+    TrimBlankTrailingRows tbl, templateRowIdx, "Add_"
+End Sub
+
+
+'=============================
+' Financial footer CCs
+'=============================
+Private Sub FillFinancials( _
+    ByVal doc As Object, _
+    ByVal rsH As DAO.Recordset, _
+    ByVal rsSpec As DAO.Recordset, _
+    ByVal rsSC As DAO.Recordset, _
+    ByVal rsRpt As DAO.Recordset, _
+    ByVal rsAdd As DAO.Recordset _
+)
+
+    On Error GoTo EH
+
+    Dim disc As Double
+    Dim VAT As Double
+
+    disc = CDbl(Nz(GetFieldAny(rsH, "Discount"), 0#))
+    ReplaceTokenEverywhere doc, "XXX", IIf(disc > 0#, FormatPercentSafe(disc), vbNullString)
+
+    VAT = CDbl(Nz(GetFieldAny(rsH, "VAT"), 0#))
+    'VVV placeholder replacement (body + headers/footers + shapes)
+    ReplaceTokenEverywhere doc, "VVV", FormatPercentSafe(VAT)
+
+    RewindRS rsSpec
+    RewindRS rsSC
+
+    Dim specGross As Currency
+    Dim scGross As Currency
+    Dim specNet As Currency
+    Dim scNet As Currency
+
+    specGross = SumGrossFromRS(rsSpec, "TestPrice", "CountOfSpecimenID", "TotalFee")
+    scGross = SumGrossFromRS(rsSC, "SC_Fee", "SC_TestQty", "Total")
+
+    specNet = SumNetFromRS_Spec(rsSpec, disc)
+    scNet = SumNetFromRS_SC(rsSC, disc)
+
+    'Reports (non-discountable)
+    Dim rptGross As Currency
+    rptGross = 0
+
+    rptGross = rptGross + Round(Nz(rsH!AddReports, 0) * Nz(rsH!TechReportPrice, 0), 2)
+    rptGross = rptGross + Round(Nz(rsH!EXAPReports, 0) * Nz(rsH!EXAPReportPrice, 0), 2)
+    rptGross = rptGross + Round(Nz(rsH!ClassReports, 0) * Nz(rsH!ClassReportPrice, 0), 2)
+    rptGross = rptGross + Round(Nz(rsH!ShortClassReports, 0) * Nz(rsH!ShortClassReportPrice, 0), 2)
+
+    'Additionals derived from q_Additionals (non-discountable)
+    Dim addGross As Currency
+    addGross = 0
+
+    Dim WasteCost As Currency
+    WasteCost = 0
+
+    If Not rsAdd Is Nothing Then
+        If Not (rsAdd.BOF And rsAdd.EOF) Then
+            rsAdd.MoveFirst
+            WasteCost = Nz(GetFieldAny(rsAdd, "WasteCost", "WastePrice"), 0)
+        End If
+    End If
+
+    If WasteCost = 0 Then
+        WasteCost = Nz(GetFieldAny(rsH, "WasteCost", "WastePrice"), 0)
+    End If
+
+    addGross = addGross + WasteCost
+
+    Dim tcGross As Currency
+    tcGross = 0
+
+    If Not rsAdd Is Nothing Then
+        If Not (rsAdd.BOF And rsAdd.EOF) Then
+            Dim rA As DAO.Recordset
+            Set rA = rsAdd.Clone
+            rA.MoveFirst
+
+            Do While Not rA.EOF
+                Dim tcQty As Long
+                Dim TCPrice As Currency
+                tcQty = Nz(GetFieldAny(rA, "AdditionalTCs"), 0)
+                TCPrice = Nz(GetFieldAny(rA, "TCPrice"), 0)
+
+                If tcQty > 0 And TCPrice > 0 Then
+                    tcGross = tcGross + Round(tcQty * TCPrice, 2)
+                End If
+
+                rA.MoveNext
+            Loop
+
+            rA.Close
+            Set rA = Nothing
+        End If
+    End If
+
+    addGross = addGross + tcGross
+
+    Dim discountableGross As Currency
+    Dim nonDiscountableGross As Currency
+    discountableGross = specGross + scGross
+    nonDiscountableGross = rptGross + addGross
+
+    Dim grossFeeAmt As Currency
+    Dim lessDiscountAmt As Currency
+    Dim vatAmt As Currency
+    Dim netFeeAmt As Currency
+
+    grossFeeAmt = Round(discountableGross + nonDiscountableGross, 2)
+
+    lessDiscountAmt = Round((specNet + scNet) + nonDiscountableGross, 2)
+
+    vatAmt = Round(lessDiscountAmt * VAT, 2)
+    netFeeAmt = Round(lessDiscountAmt + vatAmt, 2)
+
+    SetCCTextIfExists doc, "GrossFee", FormatCurrencySafe(grossFeeAmt)
+    SetCCTextIfExists doc, "VATAmount", FormatCurrencySafe(vatAmt)
+    SetCCTextIfExists doc, "NetFee", FormatCurrencySafe(netFeeAmt)
+
+    Const EPS As Double = 0.0000001
+
+    If disc <= EPS Then
+        DeleteRowContainingCC doc, "LessDiscount"
+    Else
+        SetCCTextIfExists doc, "LessDiscount", FormatCurrencySafe(lessDiscountAmt)
+    End If
+
+    Exit Sub
+
+EH:
+    Err.Raise Err.Number, Err.Source, Err.Description
+End Sub
+
+
+'=============================
+' Helpers (late-bound Word + DAO safety)
+'=============================
+
+Private Function BuildAddressBlock(ByVal rsH As DAO.Recordset) As String
+    Dim parts(1 To 6) As String
+    parts(1) = Nz(rsH!Address1Line1, "")
+    parts(2) = Nz(rsH!Address1Line2, "")
+    parts(3) = Nz(rsH!Address1Line3, "")
+    parts(4) = Nz(rsH!Address1Line4, "")
+    parts(5) = Nz(rsH!Address1Line5, "")
+    parts(6) = Nz(rsH!Address1Line6, "")
+
+    Dim i As Long, s As String
+    For i = 1 To 6
+        If Len(Trim$(parts(i))) > 0 Then
+            If Len(s) > 0 Then s = s & vbCrLf
+            s = s & parts(i)
+        End If
+    Next i
+    BuildAddressBlock = s
+End Function
+
+Private Function GetFieldAny(ByVal rs As DAO.Recordset, ParamArray names() As Variant) As Variant
+    Dim i As Long, nm As String
+    Dim v As Variant
+
+    For i = LBound(names) To UBound(names)
+        nm = Trim$(CStr(names(i)))
+        If Len(nm) = 0 Then GoTo NextName
+
+        On Error Resume Next
+        v = rs.fields(nm).value
+        If Err.Number = 0 Then
+            GetFieldAny = v
+            Exit Function
+        End If
+        Err.Clear
+        On Error GoTo 0
+
+NextName:
+    Next i
+
+    GetFieldAny = Null
+End Function
+
+Private Function SumGrossFromRS( _
+    ByVal rs As DAO.Recordset, _
+    ByVal feeField As String, _
+    ByVal qtyField As String, _
+    ByVal totalField As String _
+) As Currency
+    On Error GoTo EH
+
+    SumGrossFromRS = 0
+    If rs Is Nothing Then Exit Function
+
+    Dim r As DAO.Recordset
+    Set r = rs.Clone
+
+    If (r.BOF And r.EOF) Then GoTo CleanUp
+    r.MoveFirst
+
+    Dim sumV As Currency
+    sumV = 0
+
+    Do While Not r.EOF
+        Dim t As Currency
+        Dim fee As Currency
+        Dim Qty As Double
+
+        t = Nz(GetFieldAny(r, _
+                totalField, _
+                Replace(totalField, "_", ""), Replace(totalField, " ", ""), _
+                Replace(totalField, "_", " "), _
+                "TotalFee", "Total Fee", "Total"), 0)
+
+        If t = 0 Then
+            fee = Nz(GetFieldAny(r, _
+                    feeField, _
+                    Replace(feeField, "_", ""), Replace(feeField, " ", ""), _
+                    Replace(feeField, "_", " "), _
+                    "SC_Fee", "SCPrice", "TestPrice"), 0)
+
+            Qty = Nz(GetFieldAny(r, _
+                    qtyField, _
+                    Replace(qtyField, "_", ""), Replace(qtyField, " ", ""), _
+                    Replace(qtyField, "_", " "), _
+                    "SC_TestQty", "CountOfTestID", "CountOfSpecimenID", "Qty"), 0)
+
+            t = Round(fee * Qty, 2)
+        End If
+
+        sumV = sumV + t
+        r.MoveNext
+    Loop
+
+    SumGrossFromRS = Round(sumV, 2)
+
+CleanUp:
+    On Error Resume Next
+    r.Close
+    Set r = Nothing
+    Exit Function
+
+EH:
+    SumGrossFromRS = 0
+End Function
+
+Private Function SumNetFromRS_Spec(ByVal rs As DAO.Recordset, ByVal disc As Double) As Currency
+    On Error GoTo EH
+
+    SumNetFromRS_Spec = 0
+    If rs Is Nothing Then Exit Function
+
+    Dim r As DAO.Recordset
+    Set r = rs.Clone
+    If (r.BOF And r.EOF) Then GoTo CleanUp
+    r.MoveFirst
+
+    Dim sumV As Currency
+    sumV = 0
+
+    Do While Not r.EOF
+        Dim Qty As Double
+        Dim fee As Currency
+        Dim gross As Currency
+
+        Qty = Nz(GetFieldAny(r, "CountOfSpecimenID", "Qty", "Spec_TestQty"), 0)
+        fee = Nz(GetFieldAny(r, "TestPrice", "Spec_TestFee"), 0)
+
+        gross = Nz(GetFieldAny(r, "TotalFee", "Total Fee", "Total"), 0)
+        If gross = 0 Then gross = Round(fee * Qty, 2)
+
+        sumV = sumV + Round(gross * (1 - disc), 2)
+        r.MoveNext
+    Loop
+
+    SumNetFromRS_Spec = Round(sumV, 2)
+
+CleanUp:
+    On Error Resume Next
+    r.Close
+    Set r = Nothing
+    Exit Function
+
+EH:
+    SumNetFromRS_Spec = 0
+End Function
+
+Private Function SumNetFromRS_SC(ByVal rs As DAO.Recordset, ByVal disc As Double) As Currency
+    On Error GoTo EH
+
+    SumNetFromRS_SC = 0
+    If rs Is Nothing Then Exit Function
+
+    Dim r As DAO.Recordset
+    Set r = rs.Clone
+    If (r.BOF And r.EOF) Then GoTo CleanUp
+    r.MoveFirst
+
+    Dim sumV As Currency
+    sumV = 0
+
+    Do While Not r.EOF
+        Dim Qty As Double
+        Dim fee As Currency
+        Dim gross As Currency
+        Dim candidate As Currency
+
+        Qty = Nz(GetFieldAny(r, "SC_TestQty", "Qty", "CountOfTestID"), 0)
+        fee = Nz(GetFieldAny(r, "SC_Fee", "SCPrice"), 0)
+
+        gross = Nz(GetFieldAny(r, "Total", "TotalFee", "Total Fee"), 0)
+        If gross = 0 Then gross = Round(fee * Qty, 2)
+
+        If Qty > 1 And fee > 0 Then
+            candidate = Round(fee * Qty, 2)
+            If Abs(gross - fee) < 0.01 Then gross = candidate
+        End If
+
+        sumV = sumV + Round(gross * (1 - disc), 2)
+        r.MoveNext
+    Loop
+
+    SumNetFromRS_SC = Round(sumV, 2)
+
+CleanUp:
+    On Error Resume Next
+    r.Close
+    Set r = Nothing
+    Exit Function
+
+EH:
+    SumNetFromRS_SC = 0
+End Function
+
+Private Function FormatCurrencySafe(ByVal v As Currency) As String
+    FormatCurrencySafe = Format$(v, "£#,##0.00")
+End Function
+
+Private Function FormatPercentSafe(ByVal v As Double) As String
+    FormatPercentSafe = FormatPercent(v, 0)
+End Function
+
+Private Sub EnsureFolderExists(ByVal folderPath As String)
+    On Error GoTo EH
+    If Len(folderPath) = 0 Then Exit Sub
+    If Dir(folderPath, vbDirectory) <> "" Then Exit Sub
+
+    Dim parts() As String, i As Long, build As String
+    parts = Split(folderPath, "\")
+    build = parts(0)
+    For i = 1 To UBound(parts)
+        build = build & "\" & parts(i)
+        If Dir(build, vbDirectory) = "" Then MkDir build
+    Next i
+    Exit Sub
+EH:
+End Sub
+
+'========================================================
+' GetCCByTag: body + header/footer + text boxes (shapes)
+'========================================================
+Private Function GetCCByTag(doc As Object, ByVal tagName As String) As Object
+    On Error Resume Next
+
+    Dim want As String: want = LCase$(tagName)
+    Dim cc As Object
+
+    'Body
+    For Each cc In doc.ContentControls
+        If LCase$(Nz(cc.Tag, "")) = want Or LCase$(Nz(cc.Title, "")) = want Then
+            Set GetCCByTag = cc
+            Exit Function
+        End If
+    Next cc
+
+    'Body shapes (textboxes)
+    Set cc = FindCCInShapes(doc.shapes, want)
+    If Not cc Is Nothing Then
+        Set GetCCByTag = cc
+        Exit Function
+    End If
+
+    'Headers/Footers (including shapes)
+    Dim sec As Object, hf As Object, idx As Long
+    For Each sec In doc.Sections
+        For idx = 1 To 3
+            Set hf = sec.headers(idx)
+            If Not hf Is Nothing Then
+                For Each cc In hf.Range.ContentControls
+                    If LCase$(Nz(cc.Tag, "")) = want Or LCase$(Nz(cc.Title, "")) = want Then
+                        Set GetCCByTag = cc
+                        Exit Function
+                    End If
+                Next cc
+
+                Set cc = FindCCInShapes(hf.shapes, want)
+                If Not cc Is Nothing Then
+                    Set GetCCByTag = cc
+                    Exit Function
+                End If
+            End If
+
+            Set hf = sec.Footers(idx)
+            If Not hf Is Nothing Then
+                For Each cc In hf.Range.ContentControls
+                    If LCase$(Nz(cc.Tag, "")) = want Or LCase$(Nz(cc.Title, "")) = want Then
+                        Set GetCCByTag = cc
+                        Exit Function
+                    End If
+                Next cc
+
+                Set cc = FindCCInShapes(hf.shapes, want)
+                If Not cc Is Nothing Then
+                    Set GetCCByTag = cc
+                    Exit Function
+                End If
+            End If
+        Next idx
+    Next sec
+
+    Set GetCCByTag = Nothing
+End Function
+
+Private Function FindCCInShapes(ByVal shapes As Object, ByVal wantLower As String) As Object
+    On Error Resume Next
+    Dim shp As Object, cc As Object
+
+    If shapes Is Nothing Then Exit Function
+
+    For Each shp In shapes
+        If shp.TextFrame.HasText Then
+            For Each cc In shp.TextFrame.TextRange.ContentControls
+                If LCase$(Nz(cc.Tag, "")) = wantLower Or LCase$(Nz(cc.Title, "")) = wantLower Then
+                    Set FindCCInShapes = cc
+                    Exit Function
+                End If
+            Next cc
+        End If
+    Next shp
+End Function
+
+Private Sub UnlockCC(ByVal cc As Object)
+    On Error Resume Next
+    cc.LockContentControl = False
+    cc.LockContents = False
+End Sub
+
+Private Sub SetCCTextIfExists(ByVal doc As Object, ByVal tagName As String, ByVal valueText As String)
+    Dim cc As Object
+    Set cc = GetCCByTag(doc, tagName)
+    If cc Is Nothing Then Exit Sub
+    UnlockCC cc
+    cc.Range.text = valueText
+End Sub
+
+Private Sub SetRowCC(ByVal rowObj As Object, ByVal tagName As String, ByVal valueText As Variant)
+    Dim cc As Object
+    For Each cc In rowObj.Range.ContentControls
+        If LCase$(Nz(cc.Tag, "")) = LCase$(tagName) Or LCase$(Nz(cc.Title, "")) = LCase$(tagName) Then
+            UnlockCC cc
+
+            If IsNull(valueText) Then
+                cc.Range.text = vbNullString
+            Else
+                cc.Range.text = CStr(valueText)
+            End If
+
+            Exit Sub
+        End If
+    Next cc
+End Sub
+
+Private Function CCBlank() As String
+    CCBlank = ChrW(&H200B) ' zero-width space
+End Function
+
+Private Function FindTemplateRowIndex(ByVal tbl As Object, ByVal tagPrefix As String) As Long
+    Dim r As Long, cc As Object
+    For r = 1 To tbl.rows.Count
+        For Each cc In tbl.rows(r).Range.ContentControls
+            If LCase$(Left$(Nz(cc.Tag, ""), Len(tagPrefix))) = LCase$(tagPrefix) Then
+                FindTemplateRowIndex = r
+                Exit Function
+            End If
+        Next cc
+    Next r
+    FindTemplateRowIndex = 2
+End Function
+
+Private Sub DeleteRowsAfter(ByVal tbl As Object, ByVal templateRowIdx As Long)
+    On Error Resume Next
+    Dim r As Long
+    For r = tbl.rows.Count To templateRowIdx + 1 Step -1
+        tbl.rows(r).Delete
+    Next r
+End Sub
+
+Private Sub CloneRowFormatting(ByVal tbl As Object, ByVal templateRowIdx As Long, ByVal targetRowIdx As Long)
+    On Error Resume Next
+    If targetRowIdx > tbl.rows.Count Then tbl.rows.Add
+    tbl.rows(targetRowIdx).Range.FormattedText = tbl.rows(templateRowIdx).Range.FormattedText
+End Sub
+
+Private Sub TrimBlankTrailingRows(ByVal tbl As Object, ByVal firstDataRow As Long, Optional ByVal tagPrefix As String = vbNullString)
+    On Error Resume Next
+
+    Dim r As Long
+    For r = tbl.rows.Count To firstDataRow Step -1
+        If RowIsBlank(tbl.rows(r), tagPrefix) Then
+            tbl.rows(r).Delete
+        Else
+            Exit For
+        End If
+    Next r
+End Sub
+
+Private Function RowIsBlank(ByVal rowObj As Object, Optional ByVal tagPrefix As String = vbNullString) As Boolean
+    On Error Resume Next
+
+    Dim prefixLower As String
+    prefixLower = LCase$(Trim$(tagPrefix))
+
+    Dim cc As Object
+    Dim hasRelevantCC As Boolean
+    hasRelevantCC = False
+
+    If Len(prefixLower) > 0 Then
+        For Each cc In rowObj.Range.ContentControls
+            Dim t As String
+            t = LCase$(Trim$(Nz(cc.Tag, Nz(cc.Title, vbNullString))))
+
+            If Left$(t, Len(prefixLower)) = prefixLower Then
+                hasRelevantCC = True
+
+                Dim v As String
+                v = CleanWordTableText(cc.Range.text)
+
+                If Len(v) > 0 Then
+                    RowIsBlank = False
+                    Exit Function
+                End If
+            End If
+        Next cc
+
+        If hasRelevantCC Then
+            RowIsBlank = True
+            Exit Function
+        End If
+    End If
+
+    RowIsBlank = (Len(CleanWordTableText(rowObj.Range.text)) = 0)
+End Function
+
+Private Function CleanWordTableText(ByVal s As String) As String
+    Dim t As String
+    t = Nz(s, vbNullString)
+
+    t = Replace(t, Chr$(7), vbNullString)
+    t = Replace(t, Chr$(13), vbNullString)
+    t = Replace(t, Chr$(11), vbNullString)
+
+    t = Replace(t, vbTab, vbNullString)
+    t = Replace(t, vbCr, vbNullString)
+    t = Replace(t, vbLf, vbNullString)
+    t = Replace(t, Chr$(160), vbNullString)
+
+    t = Replace(t, ChrW(&H200B), vbNullString)
+
+    CleanWordTableText = Trim$(t)
+End Function
+
+Private Sub RemoveSectionTableAndHeading(ByVal doc As Object, ByVal sectionTag As String)
+    On Error Resume Next
+
+    Dim secCC As Object
+    Set secCC = GetCCByTag(doc, sectionTag)
+    If secCC Is Nothing Then Exit Sub
+
+    UnlockCC secCC
+
+    If secCC.Range.Tables.Count > 0 Then
+        Dim tbl As Object
+        Set tbl = secCC.Range.Tables(1)
+
+        Dim headerPara As Object
+        Set headerPara = tbl.Range.Previous(4) 'wdParagraph
+        If Not headerPara Is Nothing Then headerPara.Delete
+
+        tbl.Delete
+    Else
+        secCC.Range.Delete
+    End If
+
+    secCC.Delete
+End Sub
+
+Private Sub ExportDocToPDF(ByVal doc As Object, ByVal pdfPath As String)
+    doc.ExportAsFixedFormat _
+        OutputFileName:=pdfPath, _
+        ExportFormat:=wdExportFormatPDF, _
+        OpenAfterExport:=False, _
+        OptimizeFor:=wdExportOptimizeForPrint, _
+        Range:=wdExportAllDocument, _
+        item:=wdExportDocumentContent, _
+        IncludeDocProps:=True, _
+        KeepIRM:=True, _
+        CreateBookmarks:=wdExportCreateNoBookmarks, _
+        DocStructureTags:=True, _
+        BitmapMissingFonts:=True, _
+        UseISO19005_1:=False
+End Sub
+
+Private Function OpenSnapshotByQuoteID(ByVal db As DAO.Database, ByVal qName As String, ByVal QuoteID As Long) As DAO.Recordset
+    On Error GoTo FallbackSQL
+
+    If db Is Nothing Then
+        Set db = CurrentDb
+    End If
+
+    If Len(Nz(qName, "")) = 0 Then
+        Err.Raise vbObjectError + 520, , "OpenSnapshotByQuoteID: qName is blank."
+    End If
+
+    TempVars!QuoteID = QuoteID
+
+    Set OpenSnapshotByQuoteID = db.OpenRecordset(qName, dbOpenSnapshot)
+    Exit Function
+
+FallbackSQL:
+    On Error GoTo SafeFail
+
+    Dim qd As DAO.QueryDef
+    Dim sql As String
+
+    Set qd = db.QueryDefs(qName)
+    sql = qd.sql
+
+    sql = Replace(sql, "[TempVars]![QuoteID]", CStr(QuoteID))
+    sql = Replace(sql, "[tempvars]![QuoteID]", CStr(QuoteID))
+    sql = Replace(sql, "TempVars!QuoteID", CStr(QuoteID))
+
+    Set OpenSnapshotByQuoteID = db.OpenRecordset(sql, dbOpenSnapshot)
+    Exit Function
+
+SafeFail:
+    Err.Raise vbObjectError + 521, , "OpenSnapshotByQuoteID failed for query: " & qName & " (" & Err.Number & " - " & Err.Description & ")"
+End Function
+
+Private Function FindColIndexByRowTag(ByVal rowObj As Object, ByVal tagName As String) As Long
+    On Error Resume Next
+    Dim c As Long, cc As Object
+    For c = 1 To rowObj.Cells.Count
+        For Each cc In rowObj.Cells(c).Range.ContentControls
+            If LCase$(Nz(cc.Tag, "")) = LCase$(tagName) Or LCase$(Nz(cc.Title, "")) = LCase$(tagName) Then
+                FindColIndexByRowTag = c
+                Exit Function
+            End If
+        Next cc
+    Next c
+End Function
+
+Private Sub FillSection_Reports_ResistanceFromHeader(ByVal doc As Object, ByVal rsH As DAO.Recordset)
+
+    Dim techQ As Long, exapQ As Long, classQ As Long, shortQ As Long
+    Dim techP As Currency, exapP As Currency, classP As Currency, shortP As Currency
+
+    techQ = Nz(GetFieldAny(rsH, "AddReports"), 0)
+    techP = Nz(GetFieldAny(rsH, "TechReportPrice"), 0)
+
+    exapQ = Nz(GetFieldAny(rsH, "EXAPReports"), 0)
+    exapP = Nz(GetFieldAny(rsH, "EXAPReportPrice"), 0)
+
+    classQ = Nz(GetFieldAny(rsH, "ClassReports"), 0)
+    classP = Nz(GetFieldAny(rsH, "ClassReportPrice"), 0)
+
+    shortQ = Nz(GetFieldAny(rsH, "ShortClassReports"), 0)
+    shortP = Nz(GetFieldAny(rsH, "ShortClassReportPrice"), 0)
+
+    If (techQ + exapQ + classQ + shortQ) = 0 Then
+        RemoveSectionTableAndHeading doc, "Section_AdditionalReports"
+        Exit Sub
+    End If
+
+    Dim secCC As Object, tbl As Object, templateRowIdx As Long
+    Set secCC = GetCCByTag(doc, "Section_AdditionalReports")
+    If secCC Is Nothing Then Exit Sub
+    UnlockCC secCC
+
+    If secCC.Range.Tables.Count = 0 Then
+        RemoveSectionTableAndHeading doc, "Section_AdditionalReports"
+        Exit Sub
+    End If
+
+    Set tbl = secCC.Range.Tables(1)
+    templateRowIdx = FindTemplateRowIndex(tbl, "Report_")
+
+    'Clear any old cloned rows first, leaving the single template row.
+    DeleteRowsAfter tbl, templateRowIdx
+
+    Dim rowIdx As Long
+    rowIdx = templateRowIdx
+
+    '1) Additional Technical Report(s)
+    If techQ > 0 And techP > 0 Then
+        WriteReportRow tbl, templateRowIdx, rowIdx, "Additional Technical Report(s)", techQ, techP
+        rowIdx = rowIdx + 1
+    End If
+
+    '2) EXAP
+    If exapQ > 0 And exapP > 0 Then
+        WriteReportRow tbl, templateRowIdx, rowIdx, "Extended Application Report (EXAP)", exapQ, exapP
+        rowIdx = rowIdx + 1
+    End If
+
+    '3) Classification
+    If classQ > 0 And classP > 0 Then
+        WriteReportRow tbl, templateRowIdx, rowIdx, "Classification Report(s)", classQ, classP
+        rowIdx = rowIdx + 1
+    End If
+
+    '4) Short-form classification
+    If shortQ > 0 And shortP > 0 Then
+        WriteReportRow tbl, templateRowIdx, rowIdx, "Short-Form Classification Report(s)", shortQ, shortP
+        rowIdx = rowIdx + 1
+    End If
+
+    'FINAL CLEANUP: remove any trailing empty row(s) that Word may have auto-added
+    If rowIdx > templateRowIdx Then
+        DeleteRowsAfter tbl, rowIdx - 1
+    End If
+
+    If rowIdx = templateRowIdx Then
+        RemoveSectionTableAndHeading doc, "Section_AdditionalReports"
+    End If
+
+End Sub
+
+Private Sub WriteReportRow( _
+    ByVal tbl As Object, _
+    ByVal templateRowIdx As Long, _
+    ByVal rowIdx As Long, _
+    ByVal ReportType As String, _
+    ByVal Qty As Long, _
+    ByVal feeUnit As Currency _
+)
+    If rowIdx > templateRowIdx Then
+        CloneRowFormatting tbl, templateRowIdx, rowIdx
+    End If
+
+    SetRowCC tbl.rows(rowIdx), "Report_Type", ReportType
+    SetRowCC tbl.rows(rowIdx), "Report_Qty", CStr(Qty)
+    SetRowCC tbl.rows(rowIdx), "Report_Fee", FormatCurrencySafe(feeUnit)
+    SetRowCC tbl.rows(rowIdx), "Report_Total", FormatCurrencySafe(Round(feeUnit * Qty, 2))
+End Sub
+
+
+Private Sub ReplaceAllTextInRange(ByVal rng As Object, ByVal findText As String, ByVal replText As String)
+    With rng.Find
+        .ClearFormatting
+        .replacement.ClearFormatting
+        .text = findText
+        .replacement.text = replText
+        .Forward = True
+        .Wrap = 1           'wdFindContinue
+        .Format = False
+        .MatchCase = False
+        .MatchWholeWord = False
+        .Execute Replace:=2 'wdReplaceAll
+    End With
+End Sub
+
+Private Sub ReplaceAllTextInShapes(ByVal shapes As Object, ByVal findText As String, ByVal replText As String)
+    On Error Resume Next
+    Dim shp As Object
+
+    If shapes Is Nothing Then Exit Sub
+
+    For Each shp In shapes
+        If shp.TextFrame.HasText Then
+            ReplaceAllTextInRange shp.TextFrame.TextRange, findText, replText
+        End If
+    Next shp
+End Sub
+
+Private Sub ReplaceTokenEverywhere(ByVal doc As Object, ByVal findText As String, ByVal replText As String)
+    Dim sec As Object, hdr As Object, ftr As Object, idx As Long
+
+    ReplaceAllTextInRange doc.content, findText, replText
+    ReplaceAllTextInShapes doc.shapes, findText, replText
+
+    For Each sec In doc.Sections
+        For idx = 1 To 3
+            Set hdr = sec.headers(idx)
+            If Not hdr Is Nothing Then
+                ReplaceAllTextInRange hdr.Range, findText, replText
+                ReplaceAllTextInShapes hdr.shapes, findText, replText
+            End If
+
+            Set ftr = sec.Footers(idx)
+            If Not ftr Is Nothing Then
+                ReplaceAllTextInRange ftr.Range, findText, replText
+                ReplaceAllTextInShapes ftr.shapes, findText, replText
+            End If
+        Next idx
+    Next sec
+End Sub
+
+Private Sub RewindRS(ByVal rs As DAO.Recordset)
+    If rs Is Nothing Then Exit Sub
+    If (rs.BOF And rs.EOF) Then Exit Sub
+    rs.MoveFirst
+End Sub
+
+Private Function GetTempVarText(ByVal varName As String, Optional ByVal defaultValue As String = vbNullString) As String
+    On Error GoTo EH
+
+    Dim v As Variant
+    v = TempVars(varName).value
+
+    If IsNull(v) Then
+        GetTempVarText = defaultValue
+    Else
+        GetTempVarText = CStr(v)
+    End If
+    Exit Function
+
+EH:
+    GetTempVarText = defaultValue
+End Function
+
+Private Sub FillUserAndTnCFields(ByVal doc As Object)
+    SetCCTextIfExists doc, "USER", ProperCaseName(GetTempVarText("USER", CCBlank()))
+    SetCCTextIfExists doc, "TITLE", GetTempVarText("USERjob", CCBlank())
+    SetCCTextIfExists doc, "EMAIL", GetTempVarText("USERemail", CCBlank())
+    SetCCTextIfExists doc, "PHONE", GetTempVarText("USERtel", CCBlank())
+    SetCCTextIfExists doc, "TnCDocument", GetTempVarText("TnCName", CCBlank())
+End Sub
+
+Private Function ProperCaseName(ByVal s As String) As String
+    Dim t As String
+    t = Trim$(Nz(s, vbNullString))
+    If Len(t) = 0 Then
+        ProperCaseName = vbNullString
+        Exit Function
+    End If
+
+    t = StrConv(t, vbProperCase)
+
+    t = Replace(t, " De ", " de ")
+    t = Replace(t, " Van ", " van ")
+    t = Replace(t, " Von ", " von ")
+    t = Replace(t, " Der ", " der ")
+    t = Replace(t, " Of ", " of ")
+    t = Replace(t, " And ", " and ")
+
+    ProperCaseName = t
+End Function
+
+Private Function NormKey(ByVal v As Variant) As String
+    NormKey = LCase$(Trim$(Replace(Nz(v, vbNullString), Chr$(160), " ")))
+End Function
+
+Private Function GetCCByTagInFooters(ByVal doc As Object, ByVal tagName As String) As Object
+    On Error Resume Next
+
+    Dim want As String: want = NormKey(tagName)
+    Dim sec As Object, ftr As Object, idx As Long, cc As Object
+
+    For Each sec In doc.Sections
+        For idx = 1 To 3
+            Set ftr = sec.Footers(idx)
+            If Not ftr Is Nothing Then
+                For Each cc In ftr.Range.ContentControls
+                    If NormKey(cc.Tag) = want Or NormKey(cc.Title) = want Then
+                        Set GetCCByTagInFooters = cc
+                        Exit Function
+                    End If
+                Next cc
+            End If
+        Next idx
+    Next sec
+
+    Set GetCCByTagInFooters = Nothing
+End Function
+
+Private Sub SetFooterCCTextIfExists(ByVal doc As Object, ByVal tagName As String, ByVal valueText As String)
+    Dim cc As Object
+    Set cc = GetCCByTagInFooters(doc, tagName)
+    If cc Is Nothing Then Exit Sub
+
+    UnlockCC cc
+    cc.Range.text = valueText
+End Sub

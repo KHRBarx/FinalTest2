@@ -1,0 +1,104 @@
+Option Compare Database
+Option Explicit
+
+' ===== Types =====
+Private Type RECT
+    Left As Long
+    Top As Long
+    Right As Long
+    Bottom As Long
+End Type
+
+Private Type MONITORINFO
+    cbSize As Long
+    rcMonitor As RECT
+    rcWork As RECT
+    dwFlags As Long
+End Type
+
+' ===== API =====
+Private Declare PtrSafe Function GetWindowRect Lib "user32" ( _
+    ByVal hwnd As LongPtr, _
+    ByRef lpRect As RECT) As Long
+
+Private Declare PtrSafe Function MonitorFromWindow Lib "user32" ( _
+    ByVal hwnd As LongPtr, _
+    ByVal dwFlags As Long) As LongPtr
+
+Private Declare PtrSafe Function GetMonitorInfo Lib "user32" Alias "GetMonitorInfoA" ( _
+    ByVal hMonitor As LongPtr, _
+    ByRef lpmi As MONITORINFO) As Long
+
+Private Declare PtrSafe Function SetWindowPos Lib "user32" ( _
+    ByVal hwnd As LongPtr, _
+    ByVal hWndInsertAfter As LongPtr, _
+    ByVal x As Long, _
+    ByVal y As Long, _
+    ByVal cx As Long, _
+    ByVal cy As Long, _
+    ByVal uFlags As Long) As Long
+
+' ===== Const =====
+Private Const MONITOR_DEFAULTTONEAREST As Long = &H2
+
+Private Const SWP_NOSIZE As Long = &H1
+Private Const SWP_NOZORDER As Long = &H4
+Private Const SWP_NOACTIVATE As Long = &H10
+
+' Centers popup on the SAME monitor as the Access application window
+Public Sub CenterPopupOnAccessMonitor(ByVal FormName As String)
+    On Error GoTo EH
+
+    Dim frm As Access.Form
+    Dim rForm As RECT
+    Dim mi As MONITORINFO
+    Dim hMon As LongPtr
+
+    Dim formW As Long, formH As Long
+    Dim workL As Long, workT As Long, workR As Long, workB As Long
+    Dim workW As Long, workH As Long
+    Dim x As Long, y As Long
+
+    If Not CurrentProject.AllForms(FormName).IsLoaded Then Exit Sub
+    Set frm = Forms(FormName)
+
+    ' Optional: only popup forms
+    If frm.PopUp = False Then Exit Sub
+
+    DoCmd.SelectObject acForm, FormName, False
+    DoCmd.Restore
+
+    ' Get form size in pixels
+    If GetWindowRect(frm.hwnd, rForm) = 0 Then Exit Sub
+    formW = rForm.Right - rForm.Left
+    formH = rForm.Bottom - rForm.Top
+
+    ' Get monitor containing ACCESS APP window (not primary monitor)
+    hMon = MonitorFromWindow(Application.hWndAccessApp, MONITOR_DEFAULTTONEAREST)
+    If hMon = 0 Then Exit Sub
+
+    mi.cbSize = Len(mi)
+    If GetMonitorInfo(hMon, mi) = 0 Then Exit Sub
+
+    ' Work area excludes taskbar/docked bars
+    workL = mi.rcWork.Left
+    workT = mi.rcWork.Top
+    workR = mi.rcWork.Right
+    workB = mi.rcWork.Bottom
+
+    workW = workR - workL
+    workH = workB - workT
+
+    ' Center in that monitor's work area
+    x = workL + (workW - formW) \ 2
+    y = workT + (workH - formH) \ 3   'slightly above center
+
+    If x < workL Then x = workL
+    If y < workT Then y = workT
+
+    Call SetWindowPos(frm.hwnd, 0, x, y, 0, 0, SWP_NOSIZE Or SWP_NOZORDER Or SWP_NOACTIVATE)
+    Exit Sub
+
+EH:
+    ' Keep silent for users
+End Sub

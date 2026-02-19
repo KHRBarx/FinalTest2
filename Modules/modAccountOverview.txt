@@ -1,0 +1,10 @@
+Option Compare Database
+Option Explicit
+
+Public Sub AccountOverviewButton()
+    If IsNull(TempVars!ClientID) Then
+        Forms!MAIN_FORM!btnSummary.enabled = False
+    Else
+        Forms!MAIN_FORM!btnSummary.enabled = True
+    End If
+End Sub
